@@ -81,6 +81,19 @@ export const RideMapCanvas: React.FC<RideMapCanvasProps> = ({
   onRouteComputed,
 }) => {
   const containerRef = useRef<HTMLDivElement | null>(null);
+  const [liveSpeedKmh, setLiveSpeedKmh] = React.useState<number>(0);
+  useEffect(() => {
+    if (!navigator.geolocation) return;
+    const wid = navigator.geolocation.watchPosition(
+      (pos) => {
+        const mps = pos.coords.speed;
+        setLiveSpeedKmh(typeof mps === "number" && mps > 0 ? Math.round(mps * 3.6) : 0);
+      },
+      () => {},
+      { enableHighAccuracy: true, maximumAge: 2000 }
+    );
+    return () => navigator.geolocation.clearWatch(wid);
+  }, []);
   const mapRef = useRef<L.Map | null>(null);
   const layersRef = useRef<L.LayerGroup | null>(null);
   const pinModeRef = useRef(pinSelectMode);
@@ -223,6 +236,10 @@ export const RideMapCanvas: React.FC<RideMapCanvasProps> = ({
   return (
     <div className="relative w-full h-full bg-slate-100 overflow-hidden">
       <div ref={containerRef} className="w-full h-full z-0" />
+      <div className="absolute left-3 bottom-44 z-30 bg-slate-900/90 text-white px-3 py-1.5 rounded-2xl shadow-lg border border-amber-400/40 flex items-baseline gap-1">
+        <span className="text-lg font-extrabold text-amber-400">{liveSpeedKmh}</span>
+        <span className="text-[10px] font-bold uppercase tracking-wider text-slate-300">km/h</span>
+      </div>
       {pinSelectMode && (
         <div className="absolute top-20 left-1/2 -translate-x-1/2 z-30 bg-slate-900 text-white text-xs font-bold px-4 py-2 rounded-full shadow-lg flex items-center gap-2">
           <Navigation className="w-3.5 h-3.5 text-amber-400" />
