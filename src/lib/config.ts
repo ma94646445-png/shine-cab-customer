@@ -8,7 +8,7 @@ export async function loadAppConfig(): Promise<AppConfig> {
     razorpayKeyId: '',
     appBaseUrl: window.location.origin,
     firebaseConfig: {
-      apiKey: "AIzaSyBmhwmG-qcWl3sPXG0RFLCtvlfGzdcGG94",
+      apiKey: "AIzaSyBmhwmG-qcWl3sPXG8RFLCtvlfGzdcGG94",
       authDomain: "://firebaseapp.com",
       projectId: "shine-cab",
       storageBucket: "shine-cab.firebasestorage.app",

@@ -4,7 +4,7 @@ import { getFirestore } from 'firebase/firestore';
 import { getStorage } from 'firebase/storage';
 
 const firebaseConfig = {
-  apiKey: "AIzaSyBmhwmG-qcWl3sPXG0RFLCtvlfGzdcGG94",
+  apiKey: "AIzaSyBmhwmG-qcWl3sPXG8RFLCtvlfGzdcGG94",
   authDomain: "://firebaseapp.com",
   projectId: "shine-cab",
   storageBucket: "shine-cab.firebasestorage.app",
