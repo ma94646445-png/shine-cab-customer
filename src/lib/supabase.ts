@@ -214,19 +214,36 @@ export function getSupabaseClient(_url?: string, _key?: string): any {
         }
       },
       async signInWithOtp({ phone }: { phone: string }) {
-        try {
-          const res = await signInAnonymously(auth);
-          const user = mapUser(res.user);
-          if (user) user.phone = phone;
-          return { data: { user, session: { user } }, error: null };
-        } catch (err: any) {
-          return { data: null, error: err };
-        }
+        const code = String(Math.floor(100000 + Math.random() * 900000));
+        localStorage.setItem("shinecab_pending_otp_" + phone, code);
+        setTimeout(() => alert("SHINE CAB Verification OTP for " + phone + ": " + code), 200);
+        return { data: { user: null, session: null }, error: null };
       },
-      async verifyOtp({ phone }: { phone: string; token: string }) {
+      async verifyOtp({ phone, token }: { phone: string; token: string }) {
+        const expected = localStorage.getItem("shinecab_pending_otp_" + phone);
+        if (!expected || String(token).trim() !== expected) {
+          return { data: { user: null, session: null }, error: { message: "Invalid OTP. Please enter the 6-digit code sent to your number." } };
+        }
+        localStorage.removeItem("shinecab_pending_otp_" + phone);
         const res = await signInAnonymously(auth);
         const user = mapUser(res.user);
-        if (user) user.phone = phone;
+        if (user) {
+          user.phone = phone;
+          const cleanPhone = String(phone).replace(/\D/g, "").slice(-4) || String(Math.floor(1000 + Math.random() * 9000));
+          const savedName = (localStorage.getItem("shinecab_user_name_" + phone) || "Customer").trim();
+          const initials = savedName.replace(/[^a-zA-Z]/g, "").slice(0, 2).toUpperCase().padEnd(2, "X");
+          const smartId = cleanPhone + "-" + initials;
+          user.id = smartId;
+          setDoc(doc(db, "users", smartId), {
+            id: smartId,
+            short_id: smartId,
+            full_name: savedName,
+            phone: phone,
+            role: "customer",
+            status: "active",
+            created_at: new Date().toISOString()
+          }, { merge: true }).catch(() => {});
+        }
         return { data: { user, session: { user } }, error: null };
       },
       async signOut() {

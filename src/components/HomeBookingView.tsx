@@ -123,7 +123,7 @@ export const HomeBookingView: React.FC<HomeBookingViewProps> = ({
   const [pinSelectMode, setPinSelectMode] = useState<'pickup' | 'drop' | null>(null);
   const [routeMetrics, setRouteMetrics] = useState<RouteComputedResult | null>(null);
   const [routeError, setRouteError] = useState<string | null>(null);
-  const [mapExpandedOnMobile, setMapExpandedOnMobile] = useState(false);
+  const [mapExpandedOnMobile, setMapExpandedOnMobile] = useState(true);
 
   const [homeConfigured, setHomeConfigured] = useState<boolean>(true);
   const [categorySummaries, setCategorySummaries] = useState<HomeCategorySummary[]>([]);

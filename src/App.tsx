@@ -43,7 +43,7 @@ export default function App() {
   const [session, setSession] = useState<Session | null>(null);
   const [authChecked, setAuthChecked] = useState(false);
 
-  const [showSplash, setShowSplash] = useState(true);
+  const [showSplash, setShowSplash] = useState(false);
   const [onboardingDone, setOnboardingDone] = useState(false);
 
   const [quotaExceeded, setQuotaExceeded] = useState(false);
@@ -575,7 +575,7 @@ export default function App() {
       <OfflineIndicator />
 
       {/* Phone Top App Bar — Compact 52px */}
-      <header className="h-[52px] bg-white border-b border-neutral-200 px-3.5 flex items-center justify-between gap-2 shrink-0 z-30">
+      <header className="pt-8 h-[84px] bg-white border-b border-neutral-200 px-3.5 flex items-center justify-between gap-2 shrink-0 z-30">
         <button
           type="button"
           onClick={() => setActiveTab('home')}

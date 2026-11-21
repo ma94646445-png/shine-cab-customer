@@ -2,7 +2,7 @@ import { AppConfig } from '../types/shinecab';
 
 export async function loadAppConfig(): Promise<AppConfig> {
   return {
-    googleMapsApiKey: '',
+    googleMapsApiKey: 'osm-free',
     supabaseUrl: 'https://://firebaseapp.com',
     supabaseAnonKey: 'firebase-connected',
     razorpayKeyId: '',
@@ -18,7 +18,7 @@ export async function loadAppConfig(): Promise<AppConfig> {
     },
     firebaseVapidKey: null,
     services: {
-      maps: false,
+      maps: true,
       supabase: true,
       supabaseAdmin: true,
       razorpay: false,
