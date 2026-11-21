@@ -1,0 +1,5 @@
+package com.shinecab.customer;
+
+import com.getcapacitor.BridgeActivity;
+
+public class MainActivity extends BridgeActivity {}

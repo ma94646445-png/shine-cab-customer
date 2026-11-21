@@ -1,0 +1,6 @@
+{
+  "name": "SHINE CAB",
+  "description": "SHINE CAB — Real-time Bike, Auto & Cab ride booking PWA with Google Maps, Supabase, Razorpay & Firebase Cloud Messaging.",
+  "requestFramePermissions": ["geolocation", "microphone"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
