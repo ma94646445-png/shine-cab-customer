@@ -12,8 +12,10 @@ jobs:
         with:
           distribution: 'temurin'
           java-version: '21'
-      - name: Install Capacitor Android
-        run: npm install --legacy-peer-deps
+      - name: Install & Sync Capacitor Android
+        run: |
+          npm install --legacy-peer-deps
+          npx cap sync android
       - name: Build Debug APK
         run: |
           cd android
