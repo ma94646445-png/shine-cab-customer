@@ -1,34 +1,28 @@
 import { AppConfig } from '../types/shinecab';
 
-let cachedConfig: AppConfig | null = null;
-
 export async function loadAppConfig(): Promise<AppConfig> {
-  if (cachedConfig) return cachedConfig;
-
-  try {
-    const res = await fetch('/api/config');
-    if (res.ok) {
-      cachedConfig = (await res.json()) as AppConfig;
-      return cachedConfig;
-    }
-  } catch (err) {
-    console.error('Failed to load runtime config:', err);
-  }
-
   return {
     googleMapsApiKey: '',
-    supabaseUrl: '',
-    supabaseAnonKey: "firebase-connected",
+    supabaseUrl: 'https://://firebaseapp.com',
+    supabaseAnonKey: 'firebase-connected',
     razorpayKeyId: '',
     appBaseUrl: window.location.origin,
-    firebaseConfig: null,
+    firebaseConfig: {
+      apiKey: "AIzaSyBmhwmG-qcWl3sPXG0RFLCtvlfGzdcGG94",
+      authDomain: "://firebaseapp.com",
+      projectId: "shine-cab",
+      storageBucket: "shine-cab.firebasestorage.app",
+      messagingSenderId: "887888438839",
+      appId: "1:887888438839:web:6f7a54f442c37c2b8201b2",
+      measurementId: "G-EB52ZHGE75"
+    },
     firebaseVapidKey: null,
     services: {
       maps: false,
-      supabase: false,
-      supabaseAdmin: false,
+      supabase: true,
+      supabaseAdmin: true,
       razorpay: false,
-      fcm: false,
+      fcm: true,
     },
   };
 }

@@ -8,12 +8,12 @@ const firebaseConfig = {
   authDomain: "://firebaseapp.com",
   projectId: "shine-cab",
   storageBucket: "shine-cab.firebasestorage.app",
-  messagingSenderId: "807888430839",
-  appId: "1:807888430839:web:6f7a54f442c37c2b8201b2",
-  measurementId: "G-EBS2ZHGE7S"
+  messagingSenderId: "887888438839",
+  appId: "1:887888438839:web:6f7a54f442c37c2b8201b2",
+  measurementId: "G-EB52ZHGE75"
 };
 
-const app = getApps().length ? getApps()[0] : initializeApp(firebaseConfig);
+const app = getApps().length ? getApps() : initializeApp(firebaseConfig);
 export const auth = getAuth(app);
 export const db = getFirestore(app);
 export const storage = getStorage(app);
