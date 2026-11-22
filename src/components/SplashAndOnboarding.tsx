@@ -196,16 +196,10 @@ export const OnboardingScreen: React.FC<SplashAndOnboardingProps> = ({ onComplet
 
   return (
     <div className="flex-1 min-h-0 bg-[#111111] text-white flex flex-col justify-between overflow-hidden">
-      {/* Top Bar: Logo + Skip Button Only */}
-      <div className="px-5 pt-5 pb-2 flex items-center justify-between gap-2 shrink-0">
+      {/* Top Bar: Clean Brand Logo Only */}
+      <div className="px-5 pt-4 pb-2 flex items-center justify-between gap-2 shrink-0">
         <ShineCabLogo variant="dark" size="sm" />
-        <button
-          type="button"
-          onClick={() => onComplete('get_started')}
-          className="min-h-[44px] px-4 rounded-full bg-white/10 hover:bg-[#FFC928] text-xs font-semibold text-white hover:text-[#111111] transition-colors cursor-pointer whitespace-nowrap"
-        >
-          Skip
-        </button>
+        <span className="text-[11px] font-medium text-neutral-400">Swipe left or right</span>
       </div>
 
       {/* Full-Height Black Background Horizontal Carousel (Auto + Manual Swipe/Scroll) */}
@@ -296,7 +290,13 @@ export const OnboardingScreen: React.FC<SplashAndOnboardingProps> = ({ onComplet
           ))}
         </div>
 
-        <span className="text-[11px] text-neutral-400">Swipe left or right</span>
+        <button
+          type="button"
+          onClick={() => onComplete('get_started')}
+          className="min-h-[42px] px-5 rounded-full bg-[#FFC928] text-xs font-bold text-[#111111] hover:brightness-95 transition cursor-pointer whitespace-nowrap"
+        >
+          Skip
+        </button>
       </div>
     </div>
   );

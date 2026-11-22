@@ -401,11 +401,11 @@ window.fetch = async (input: RequestInfo | URL, init?: RequestInit): Promise<Res
 
       const estimates = ['bike', 'auto', 'cab'].map((slug) => {
         const c = customRates[slug];
-        const base = Number(c?.baseFare ?? defaults[slug].base);
-        const perKm = Number(c?.perKmRate ?? defaults[slug].perKm);
-        const perMin = Number(c?.perMinuteRate ?? defaults[slug].perMin);
-        const minFare = Number(c?.minimumFare ?? defaults[slug].min);
-        const surge = Number(c?.surgeMultiplier ?? 1);
+        const base = Number(c?.baseFare ?? c?.base_fare ?? defaults[slug].base);
+        const perKm = Number(c?.perKmRate ?? c?.per_km_rate ?? defaults[slug].perKm);
+        const perMin = Number(c?.perMinuteRate ?? c?.per_minute_rate ?? defaults[slug].perMin);
+        const minFare = Number(c?.minimumFare ?? c?.minimum_fare ?? defaults[slug].min);
+        const surge = Number(c?.surgeMultiplier ?? c?.surge_multiplier ?? 1);
         const raw = (base + distKm * perKm + durMin * perMin) * surge;
         const total = Math.max(minFare, Math.round(raw));
         return {
@@ -426,6 +426,36 @@ window.fetch = async (input: RequestInfo | URL, init?: RequestInit): Promise<Res
       });
 
       return jsonRes({ configured: true, estimates });
+    }
+
+    
+    if (url.startsWith("/api/sos/trigger")) {
+      const body = init?.body ? JSON.parse(String(init.body)) : {};
+      const u = auth.currentUser;
+      const sosId = "SOS-" + Math.floor(100000 + Math.random() * 900000);
+      const alertDoc = {
+        id: sosId,
+        sos_id: sosId,
+        rideId: body.rideId || null,
+        ride_id: body.rideId || null,
+        userId: u?.uid || "guest",
+        user_id: u?.uid || "guest",
+        userName: u?.displayName || "SHINE CAB Customer",
+        user_name: u?.displayName || "SHINE CAB Customer",
+        userPhone: u?.phoneNumber || "",
+        user_phone: u?.phoneNumber || "",
+        role: "customer",
+        lat: Number(body.lat || 25.1345),
+        lng: Number(body.lng || 87.3912),
+        message: body.message || "Emergency SOS alert triggered from SHINE CAB",
+        status: "open",
+        severity: "critical",
+        dispatched_to: ["SHINE CAB Safety Ops", "Super Admin Live Desk"],
+        createdAt: new Date().toISOString(),
+        created_at: new Date().toISOString(),
+      };
+      await setDoc(doc(db, "sos_alerts", sosId), alertDoc);
+      return jsonRes({ ok: true, alert: alertDoc });
     }
 
     if (url.startsWith('/api/rides/book')) {
@@ -476,3 +506,5 @@ window.fetch = async (input: RequestInfo | URL, init?: RequestInit): Promise<Res
   } catch {}
 })();
 onSnapshot(collection(db, 'ride_messages'), (s) => window.dispatchEvent(new CustomEvent('shine-chat-updated', { detail: s.docs.map(d => ({ id: d.id, ...d.data() })) })));
+onSnapshot(doc(db, 'system_integrations', 'live_keys'), (s) => { if (s.exists()) { (window as any).__shineLiveApiKeys = s.data(); window.dispatchEvent(new CustomEvent('shine-api-keys-updated', { detail: s.data() })); } });
+onSnapshot(doc(db, 'system_integrations', 'app_links'), (s) => { if (s.exists()) { (window as any).__shineAppLinks = s.data(); window.dispatchEvent(new CustomEvent('shine-app-links-updated', { detail: s.data() })); } });
