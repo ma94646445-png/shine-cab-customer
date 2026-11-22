@@ -1,17 +1,19 @@
 import React, { useState } from 'react';
 import { ShieldAlert, PhoneCall, X, CheckCircle2 } from 'lucide-react';
+import { addDoc, collection } from 'firebase/firestore';
+import { db, handleFirestoreError, OperationType } from '../lib/firebase';
 import { EmergencyContact } from '../types/shinecab';
 
 interface EmergencySosModalProps {
   rideId?: string | null;
-  accessToken: string;
+  customerUid: string;
   contacts: EmergencyContact[];
   onClose: () => void;
 }
 
 export const EmergencySosModal: React.FC<EmergencySosModalProps> = ({
   rideId,
-  accessToken,
+  customerUid,
   contacts,
   onClose,
 }) => {
@@ -25,23 +27,30 @@ export const EmergencySosModal: React.FC<EmergencySosModalProps> = ({
     setError(null);
 
     const submitWithCoords = async (lat?: number, lng?: number) => {
+      const recipients = [
+        'SHINE CAB Safety Ops',
+        ...contacts.map((c) => `${c.name} (${c.phone})`),
+      ];
       try {
-        const res = await fetch('/api/sos/trigger', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            Authorization: `Bearer ${accessToken}`,
-          },
-          body: JSON.stringify({ rideId: rideId || null, lat, lng, message }),
+        await addDoc(collection(db, 'sos_alerts'), {
+          customer_uid: customerUid,
+          ride_id: rideId || null,
+          lat: lat ?? null,
+          lng: lng ?? null,
+          message: message.trim() || 'Emergency SOS triggered',
+          status: 'dispatched',
+          dispatched_to: recipients,
+          resolved_at: null,
+          created_at: new Date().toISOString(),
         });
-        const data = await res.json();
-        if (!res.ok) {
-          setError(data.error || 'Unable to dispatch SOS alert.');
-          return;
+        setDispatchedTo(recipients);
+      } catch (err) {
+        setError('Unable to save SOS alert. Dial emergency helpline 112 immediately.');
+        try {
+          handleFirestoreError(err, OperationType.CREATE, 'sos_alerts');
+        } catch {
+          // logged
         }
-        setDispatchedTo(data.alert?.dispatched_to || ['SHINE CAB Safety Ops']);
-      } catch {
-        setError('Network error. Dial emergency helpline 112 immediately.');
       } finally {
         setSending(false);
       }
@@ -59,8 +68,8 @@ export const EmergencySosModal: React.FC<EmergencySosModalProps> = ({
   };
 
   return (
-    <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-end justify-center">
-      <div className="bg-white rounded-t-3xl w-full p-5 pb-safe shadow-2xl border-t border-neutral-200 space-y-4 max-h-[88%] overflow-y-auto">
+    <div className="fixed inset-0 z-[500] bg-black/60 backdrop-blur-sm flex items-end justify-center">
+      <div className="bg-white rounded-t-3xl w-full p-5 pb-[max(env(safe-area-inset-bottom),16px)] shadow-2xl border-t border-neutral-200 space-y-4 max-h-[88%] overflow-y-auto">
         <div className="w-10 h-1 bg-neutral-300 rounded-full mx-auto" />
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2 text-[#DC2626]">
@@ -97,7 +106,7 @@ export const EmergencySosModal: React.FC<EmergencySosModalProps> = ({
         ) : (
           <>
             <p className="text-xs text-[#737373] leading-relaxed">
-              Triggering SOS records an emergency alert with your live coordinates and notifies SHINE CAB Safety Operations and your emergency contacts.
+              Triggering SOS records an emergency alert with your live GPS coordinates and notifies SHINE CAB Safety Operations and your trusted contacts.
             </p>
 
             {contacts.length > 0 && (

@@ -23,7 +23,7 @@ const SLIDES = [
     badge: 'Fast pickup across your city',
     title: 'Book Bike, Auto & Cab Easily.',
     description:
-      'Pick your pickup and drop on the map to get instant distance-based fares across Bike, Auto, and Cab with zero surprises.',
+      'Pick your pickup and drop on the live map to get instant distance-based fares across Bike, Auto, and Cab with zero surprises.',
     icon: MapPin,
     highlightCards: [
       { label: 'Bike', tag: 'Quick', icon: Bike },
@@ -66,17 +66,17 @@ export const SplashScreen: React.FC<{ onFinished: () => void }> = ({ onFinished 
   }, [onFinished]);
 
   return (
-    <div className="flex-1 bg-[#111111] text-white flex flex-col items-center justify-center p-6">
+    <div className="flex-1 bg-[#1E1E1E] text-white flex flex-col items-center justify-center p-6">
       <div className="flex flex-col items-center gap-6">
         <ShineCabLogo variant="dark" size="xl" showWordmark={false} animated />
         <div className="text-center space-y-1.5">
           <h1 className="font-display text-3xl font-extrabold tracking-tight text-white">
-            SHINE <span className="text-[#FFC928]">CAB</span>
+            SHINE <span className="text-[#F5C518]">CAB</span>
           </h1>
           <p className="text-sm text-neutral-400">Bike · Auto · Cab Mobility</p>
         </div>
         <div className="w-40 h-1 bg-neutral-800 rounded-full overflow-hidden">
-          <div className="h-full bg-[#FFC928] w-2/3 animate-[pulse_1.2s_ease-in-out_infinite] rounded-full" />
+          <div className="h-full bg-[#F5C518] w-2/3 animate-[pulse_1.2s_ease-in-out_infinite] rounded-full" />
         </div>
       </div>
     </div>
@@ -125,7 +125,6 @@ export const OnboardingScreen: React.FC<SplashAndOnboardingProps> = ({ onComplet
     }
   }, []);
 
-  // Auto-scroll seamlessly across all 3 onboarding pages
   useEffect(() => {
     if (userInteracting) return;
 
@@ -195,14 +194,16 @@ export const OnboardingScreen: React.FC<SplashAndOnboardingProps> = ({ onComplet
   };
 
   return (
-    <div className="flex-1 min-h-0 bg-[#111111] text-white flex flex-col justify-between overflow-hidden">
-      {/* Top Bar: Clean Brand Logo Only */}
+    <div className="flex-1 min-h-0 bg-[#1E1E1E] text-white flex flex-col justify-between overflow-hidden">
+      {/* Top Bar: Clean Logo Header (No top-right Skip button) */}
       <div className="px-5 pt-4 pb-2 flex items-center justify-between gap-2 shrink-0">
         <ShineCabLogo variant="dark" size="sm" />
-        <span className="text-[11px] font-medium text-neutral-400">Swipe left or right</span>
+        <span className="font-mono-num text-xs font-semibold text-neutral-400">
+          0{slideIndex + 1} / 0{SLIDES.length}
+        </span>
       </div>
 
-      {/* Full-Height Black Background Horizontal Carousel (Auto + Manual Swipe/Scroll) */}
+      {/* Black Background Horizontal Carousel (Auto + Manual Swipe/Scroll) */}
       <div
         ref={scrollerRef}
         onScroll={handleHorizontalScroll}
@@ -216,24 +217,19 @@ export const OnboardingScreen: React.FC<SplashAndOnboardingProps> = ({ onComplet
         aria-label="Onboarding pages"
         className="flex-1 min-h-0 flex overflow-x-auto snap-x snap-mandatory no-scrollbar touch-pan-x select-none cursor-grab active:cursor-grabbing"
       >
-        {SLIDES.map((slide, idx) => {
+        {SLIDES.map((slide) => {
           const SlideIcon = slide.icon;
           return (
             <div
               key={slide.id}
-              className="w-full shrink-0 snap-center snap-always px-6 py-6 flex flex-col justify-center gap-6"
+              className="w-full shrink-0 snap-center snap-always px-6 py-5 flex flex-col justify-center gap-6"
             >
-              <div className="flex items-center justify-between gap-3">
-                <div className="w-14 h-14 rounded-2xl bg-[#FFC928] text-[#111111] flex items-center justify-center shrink-0 shadow-md">
-                  <SlideIcon className="w-7 h-7" />
-                </div>
-                <span className="font-mono-num text-xs font-bold text-neutral-400">
-                  0{idx + 1} / 0{SLIDES.length}
-                </span>
+              <div className="w-14 h-14 rounded-2xl bg-[#F5C518] text-[#111111] flex items-center justify-center shrink-0 shadow-md">
+                <SlideIcon className="w-7 h-7" />
               </div>
 
               <div className="space-y-2.5">
-                <p className="text-xs font-semibold text-[#FFC928] tracking-wide uppercase">
+                <p className="text-xs font-semibold text-[#F5C518] tracking-wide uppercase">
                   {slide.badge}
                 </p>
                 <h2 className="font-display text-3xl font-bold tracking-tight text-white [text-wrap:balance]">
@@ -242,7 +238,6 @@ export const OnboardingScreen: React.FC<SplashAndOnboardingProps> = ({ onComplet
                 <p className="text-sm text-neutral-300 leading-relaxed">{slide.description}</p>
               </div>
 
-              {/* 3 Highlight Preview Cards */}
               <div className="grid grid-cols-3 gap-2.5 pt-2">
                 {slide.highlightCards.map((item) => {
                   const CardIcon = item.icon;
@@ -251,7 +246,7 @@ export const OnboardingScreen: React.FC<SplashAndOnboardingProps> = ({ onComplet
                       key={item.label}
                       className="rounded-2xl bg-white/8 border border-white/10 p-3 flex flex-col gap-1.5"
                     >
-                      <CardIcon className="w-4 h-4 text-[#FFC928]" />
+                      <CardIcon className="w-4 h-4 text-[#F5C518]" />
                       <p className="text-xs font-bold text-white truncate">{item.label}</p>
                       <p className="text-[11px] text-neutral-400 font-mono-num truncate">
                         {item.tag}
@@ -265,8 +260,8 @@ export const OnboardingScreen: React.FC<SplashAndOnboardingProps> = ({ onComplet
         })}
       </div>
 
-      {/* Bottom Pagination Dots Strip (Black Background, No Arrow Button) */}
-      <div className="px-6 pb-8 pt-3 flex items-center justify-between gap-4 shrink-0">
+      {/* Bottom Control Bar: Pagination Dots + Clean Aligned Skip Button */}
+      <div className="px-6 pb-6 pt-3 flex items-center justify-between gap-4 shrink-0 border-t border-white/10">
         <div className="flex items-center gap-2">
           {SLIDES.map((s, idx) => (
             <button
@@ -277,23 +272,19 @@ export const OnboardingScreen: React.FC<SplashAndOnboardingProps> = ({ onComplet
                 scrollToSlide(idx, 'smooth');
               }}
               aria-label={`Go to onboarding page ${idx + 1}`}
-              className={`h-2 rounded-full transition-all cursor-pointer overflow-hidden ${
+              className={`h-2.5 rounded-full transition-all cursor-pointer overflow-hidden ${
                 idx === slideIndex
-                  ? 'w-10 bg-neutral-700'
+                  ? 'w-10 bg-[#F5C518]'
                   : 'w-2.5 bg-neutral-700 hover:bg-neutral-500'
               }`}
-            >
-              {idx === slideIndex && (
-                <span className="block h-full w-full bg-[#FFC928] rounded-full" />
-              )}
-            </button>
+            />
           ))}
         </div>
 
         <button
           type="button"
-          onClick={() => onComplete('get_started')}
-          className="min-h-[42px] px-5 rounded-full bg-[#FFC928] text-xs font-bold text-[#111111] hover:brightness-95 transition cursor-pointer whitespace-nowrap"
+          onClick={() => onComplete('login')}
+          className="min-h-[44px] px-5 rounded-xl bg-[#F5C518] text-[#111111] text-xs font-bold hover:brightness-95 active:scale-[0.98] transition cursor-pointer whitespace-nowrap"
         >
           Skip
         </button>

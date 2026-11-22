@@ -1,12 +1,16 @@
 export type VehicleSlug = 'bike' | 'auto' | 'cab';
 
 export type RideStatus =
+  | 'searching'
   | 'searching_driver'
   | 'driver_assigned'
+  | 'arrived'
   | 'driver_arriving'
   | 'driver_reached_pickup'
   | 'otp_verification'
+  | 'in_progress'
   | 'ride_started'
+  | 'completed'
   | 'ride_completed'
   | 'payment_pending'
   | 'payment_completed'
@@ -68,9 +72,11 @@ export interface FareEstimate {
 
 export interface UserProfile {
   id: string;
+  uid?: string;
   phone: string;
   email: string | null;
   full_name: string | null;
+  short_id?: string | null;
   avatar_url: string | null;
   language_preference: string;
   created_at?: string;
@@ -109,13 +115,28 @@ export interface AssignedVehicleInfo {
   registration_number: string;
 }
 
+export interface LiveNotificationAlert {
+  id: string;
+  title: string;
+  message: string;
+  targetAudience?: string;
+  active?: boolean;
+  actionLink?: string | null;
+  created_at: string;
+}
+
 export interface RideRecord {
   id: string;
   ride_code: string;
   customer_id: string;
+  customer_uid?: string;
+  customer_name?: string;
+  customer_phone?: string;
+  customer_short_id?: string;
   driver_id: string | null;
   vehicle_id: string | null;
   category_id: string;
+  vehicle_slug?: VehicleSlug;
   status: RideStatus;
   pickup_address: string;
   pickup_lat: number;

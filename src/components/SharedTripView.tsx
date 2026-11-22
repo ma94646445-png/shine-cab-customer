@@ -1,13 +1,13 @@
 import React, { useEffect, useState } from 'react';
-import { APIProvider } from '@vis.gl/react-google-maps';
 import { Navigation, ShieldCheck, AlertTriangle } from 'lucide-react';
-import { AppConfig } from '../types/shinecab';
+import { doc, onSnapshot } from 'firebase/firestore';
+import { db, handleFirestoreError, OperationType } from '../lib/firebase';
 import { ShineCabLogo } from './ShineCabLogo';
 import { RideMapCanvas } from './RideMapCanvas';
 
 interface SharedTripViewProps {
   token: string;
-  config: AppConfig;
+  googleMapsApiKey?: string;
   onExitShare: () => void;
 }
 
@@ -21,24 +21,16 @@ interface SharedTripData {
   drop_address: string;
   drop_lat: number;
   drop_lng: number;
-  vehicle_categories?: { name: string; slug: 'bike' | 'auto' | 'cab' } | null;
-  drivers?: {
-    rating_avg: number;
-    current_lat: number | null;
-    current_lng: number | null;
-    users?: { full_name: string | null } | null;
-  } | null;
-  vehicles?: {
-    make: string;
-    model: string;
-    color: string;
-    registration_number: string;
-  } | null;
+  driver_name?: string | null;
+  driver_lat?: number | null;
+  driver_lng?: number | null;
+  vehicle_label?: string | null;
+  registration_number?: string | null;
 }
 
 export const SharedTripView: React.FC<SharedTripViewProps> = ({
   token,
-  config,
+  googleMapsApiKey,
   onExitShare,
 }) => {
   const [trip, setTrip] = useState<SharedTripData | null>(null);
@@ -46,29 +38,31 @@ export const SharedTripView: React.FC<SharedTripViewProps> = ({
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    let active = true;
-    const fetchTrip = async () => {
-      try {
-        const res = await fetch(`/api/trips/share/${encodeURIComponent(token)}`);
-        const data = await res.json();
-        if (!active) return;
-        if (!res.ok || !data.trip) {
-          setError(data.error || 'Shared trip link is invalid or expired.');
+    const path = `shared_trips/${token}`;
+    const unsub = onSnapshot(
+      doc(db, 'shared_trips', token),
+      (snap) => {
+        if (!snap.exists()) {
+          setTrip(null);
+          setError('Shared trip link is invalid or expired.');
         } else {
-          setTrip(data.trip);
+          setTrip(snap.data() as SharedTripData);
+          setError(null);
         }
-      } catch {
-        if (active) setError('Unable to load shared trip.');
-      } finally {
-        if (active) setLoading(false);
+        setLoading(false);
+      },
+      (err) => {
+        setLoading(false);
+        setError('Unable to load shared trip.');
+        try {
+          handleFirestoreError(err, OperationType.GET, path);
+        } catch {
+          // logged
+        }
       }
-    };
-    fetchTrip();
-    const poll = setInterval(fetchTrip, 10000);
-    return () => {
-      active = false;
-      clearInterval(poll);
-    };
+    );
+
+    return () => unsub();
   }, [token]);
 
   return (
@@ -78,7 +72,7 @@ export const SharedTripView: React.FC<SharedTripViewProps> = ({
         <button
           type="button"
           onClick={onExitShare}
-          className="min-h-[38px] px-3 rounded-xl bg-[#111111] text-[#FFC928] text-xs font-semibold cursor-pointer"
+          className="min-h-[38px] px-3 rounded-xl bg-[#111111] text-[#F5C518] text-xs font-semibold cursor-pointer"
         >
           Open SHINE CAB
         </button>
@@ -98,33 +92,27 @@ export const SharedTripView: React.FC<SharedTripViewProps> = ({
       ) : (
         <div className="flex-1 min-h-0 flex flex-col overflow-hidden">
           <div className="h-[54%] shrink-0">
-            {config.services.maps ? (
-              <APIProvider apiKey={config.googleMapsApiKey} language="en" region="IN">
-                <RideMapCanvas
-                  pickup={{
-                    address: trip.pickup_address,
-                    lat: trip.pickup_lat,
-                    lng: trip.pickup_lng,
-                  }}
-                  drop={{
-                    address: trip.drop_address,
-                    lat: trip.drop_lat,
-                    lng: trip.drop_lng,
-                  }}
-                  driverLocation={
-                    trip.drivers?.current_lat && trip.drivers?.current_lng
-                      ? { lat: trip.drivers.current_lat, lng: trip.drivers.current_lng }
-                      : null
-                  }
-                  pinSelectMode={null}
-                  onRequestCurrentGps={() => {}}
-                />
-              </APIProvider>
-            ) : (
-              <div className="w-full h-full bg-neutral-100 flex items-center justify-center text-xs text-[#737373]">
-                Service configuration required. Please contact support.
-              </div>
-            )}
+            <RideMapCanvas
+              googleMapsApiKey={googleMapsApiKey}
+              isActiveRide
+              pickup={{
+                address: trip.pickup_address,
+                lat: trip.pickup_lat,
+                lng: trip.pickup_lng,
+              }}
+              drop={{
+                address: trip.drop_address,
+                lat: trip.drop_lat,
+                lng: trip.drop_lng,
+              }}
+              driverLocation={
+                trip.driver_lat && trip.driver_lng
+                  ? { lat: trip.driver_lat, lng: trip.driver_lng }
+                  : null
+              }
+              pinSelectMode={null}
+              onRequestCurrentGps={() => {}}
+            />
           </div>
 
           <div className="flex-1 min-h-0 -mt-4 rounded-t-3xl bg-white p-4 space-y-3.5 border-t border-neutral-200 shadow-[0_-8px_24px_rgba(0,0,0,0.08)] overflow-y-auto relative z-10">
@@ -144,17 +132,19 @@ export const SharedTripView: React.FC<SharedTripViewProps> = ({
                 <strong>Destination:</strong> {trip.drop_address}
               </p>
             </div>
-            {trip.drivers && trip.vehicles && (
+            {trip.driver_name && (
               <div className="rounded-2xl border border-neutral-200 p-3.5 space-y-1 text-xs">
                 <p className="font-bold text-[#111111] flex items-center gap-1.5">
-                  <Navigation className="w-4 h-4 text-[#FFC928]" />
-                  <span>{trip.drivers.users?.full_name || 'Verified Driver'}</span>
+                  <Navigation className="w-4 h-4 text-[#F5C518]" />
+                  <span>{trip.driver_name}</span>
                 </p>
                 <p className="text-[#737373]">
-                  {trip.vehicles.color} {trip.vehicles.make} {trip.vehicles.model} ·{' '}
-                  <span className="font-mono-num font-bold text-[#111111]">
-                    {trip.vehicles.registration_number}
-                  </span>
+                  {trip.vehicle_label || 'Verified Vehicle'}{' '}
+                  {trip.registration_number && (
+                    <span className="font-mono-num font-bold text-[#111111]">
+                      · {trip.registration_number}
+                    </span>
+                  )}
                 </p>
               </div>
             )}

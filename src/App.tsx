@@ -1,16 +1,26 @@
-import React, { useCallback, useEffect, useState } from 'react';
-import { APIProvider } from '@vis.gl/react-google-maps';
-import { Session, SupabaseClient } from '@supabase/supabase-js';
-import { Home, Car, Tag, LifeBuoy, User, Bell, MessageSquare, X } from 'lucide-react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import { Home, Car, Tag, LifeBuoy, User, Bell, MessageSquare, X, Megaphone, ExternalLink, ArrowRight } from 'lucide-react';
+import { onAuthStateChanged, User as FirebaseUser } from 'firebase/auth';
+import {
+  collection,
+  doc,
+  onSnapshot,
+  query,
+  updateDoc,
+  where,
+  writeBatch,
+} from 'firebase/firestore';
 import { loadAppConfig } from './lib/config';
-import { getSupabaseClient } from './lib/supabase';
+import { auth, db, generateShortCustomerId } from './lib/firebase';
 import {
   AppConfig,
   Coupon,
   CustomerProfile,
   EmergencyContact,
+  LiveNotificationAlert,
   LocationPoint,
   NotificationRecord,
+  PaymentMethod,
   PaymentRecord,
   RideRecord,
   RideTrackingPoint,
@@ -37,42 +47,73 @@ import { PhoneFrame } from './components/PhoneFrame';
 
 type NavTab = 'home' | 'rides' | 'offers' | 'notifications' | 'support' | 'profile' | 'chat';
 
+const ACTIVE_RIDE_STATUSES = new Set([
+  'searching',
+  'searching_driver',
+  'driver_assigned',
+  'arrived',
+  'driver_arriving',
+  'driver_reached_pickup',
+  'otp_verification',
+  'in_progress',
+  'ride_started',
+  'completed',
+  'ride_completed',
+  'payment_pending',
+]);
+
+function sortByDateDesc<T extends { created_at?: string }>(items: T[]): T[] {
+  return [...items].sort(
+    (a, b) => new Date(b.created_at || 0).getTime() - new Date(a.created_at || 0).getTime()
+  );
+}
+
 export default function App() {
   const [config, setConfig] = useState<AppConfig | null>(null);
-  const [supabase, setSupabase] = useState<SupabaseClient | null>(null);
-  const [session, setSession] = useState<Session | null>(null);
+  const [firebaseUser, setFirebaseUser] = useState<FirebaseUser | null>(null);
   const [authChecked, setAuthChecked] = useState(false);
 
-  const [showSplash, setShowSplash] = useState(false);
-  const [onboardingDone, setOnboardingDone] = useState(false);
+  const [showSplash, setShowSplash] = useState(true);
+  const [onboardingDone, setOnboardingDone] = useState<boolean>(() => {
+    if (typeof window === 'undefined') return false;
+    return localStorage.getItem('shinecab_onboarding_v3_seen') === 'true';
+  });
 
-  const [quotaExceeded, setQuotaExceeded] = useState(false);
-  const [guestMode, setGuestMode] = useState(false);
   const [authInitialMode, setAuthInitialMode] = useState<'login' | 'signup'>('login');
   const [activeTab, setActiveTab] = useState<NavTab>('home');
-  const [wsLive, setWsLive] = useState(false);
-  const [liveToast, setLiveToast] = useState<NotificationRecord | null>(null);
+  const [liveConnected, setLiveConnected] = useState(false);
   const [showSosModal, setShowSosModal] = useState(false);
   const [preAppliedCoupon, setPreAppliedCoupon] = useState<string | null>(null);
   const [supportRideId, setSupportRideId] = useState<string | null>(null);
   const [selectedChatRideId, setSelectedChatRideId] = useState<string | null>(null);
 
-  // Domain state loaded strictly from Supabase
+  // Real-time Firestore domain state
   const [userProfile, setUserProfile] = useState<UserProfile | null>(null);
-  const [customerProfile, setCustomerProfile] = useState<CustomerProfile | null>(null);
+  const [userDocLoaded, setUserDocLoaded] = useState(false);
   const [rides, setRides] = useState<RideRecord[]>([]);
   const [scheduledRides, setScheduledRides] = useState<ScheduledRide[]>([]);
-  const [activeRide, setActiveRide] = useState<RideRecord | null>(null);
-  const [liveTracking, setLiveTracking] = useState<RideTrackingPoint | null>(null);
+  const [dismissedRideIds, setDismissedRideIds] = useState<string[]>([]);
+  const [driverDocTracking, setDriverDocTracking] = useState<RideTrackingPoint | null>(null);
   const [savedAddresses, setSavedAddresses] = useState<SavedAddress[]>([]);
   const [emergencyContacts, setEmergencyContacts] = useState<EmergencyContact[]>([]);
   const [coupons, setCoupons] = useState<Coupon[]>([]);
   const [couponUsage, setCouponUsage] = useState<any[]>([]);
   const [payments, setPayments] = useState<PaymentRecord[]>([]);
-  const [notifications, setNotifications] = useState<NotificationRecord[]>([]);
+  const [userNotifications, setUserNotifications] = useState<NotificationRecord[]>([]);
+  const [liveAlerts, setLiveAlerts] = useState<LiveNotificationAlert[]>([]);
+  const [readBroadcastIds, setReadBroadcastIds] = useState<string[]>(() => {
+    try {
+      const raw = localStorage.getItem('shinecab_read_broadcasts');
+      return raw ? JSON.parse(raw) : [];
+    } catch {
+      return [];
+    }
+  });
+  const [dismissedBannerIds, setDismissedBannerIds] = useState<string[]>([]);
   const [tickets, setTickets] = useState<SupportTicket[]>([]);
   const [sosAlerts, setSosAlerts] = useState<SosAlertRecord[]>([]);
   const [dataLoading, setDataLoading] = useState(false);
+  const [refreshTick, setRefreshTick] = useState(0);
 
   const shareTokenParam =
     typeof window !== 'undefined'
@@ -80,350 +121,467 @@ export default function App() {
       : null;
   const [shareToken, setShareToken] = useState<string | null>(shareTokenParam);
 
-  // Google Maps Platform Case A Quota Defense listener
+  const [gmpQuotaExceeded, setGmpQuotaExceeded] = useState(false);
+
+  // Listen for Google Maps Platform Demo Key quota exhaustion events
   useEffect(() => {
-    const handler = () => setQuotaExceeded(true);
-    window.addEventListener('gmp-quota-exceeded', handler);
-    return () => window.removeEventListener('gmp-quota-exceeded', handler);
+    const onQuotaExceeded = () => setGmpQuotaExceeded(true);
+    window.addEventListener('gmp-quota-exceeded', onQuotaExceeded);
+    return () => window.removeEventListener('gmp-quota-exceeded', onQuotaExceeded);
   }, []);
 
-  // Load runtime config & initialize Supabase auth session
+  // Load optional runtime config cleanly (never blocks Firebase)
   useEffect(() => {
     let mounted = true;
-    loadAppConfig().then(async (cfg) => {
-      if (!mounted) return;
-      setConfig(cfg);
-      const client = getSupabaseClient(cfg.supabaseUrl, cfg.supabaseAnonKey);
-      setSupabase(client);
-
-      if (!client) {
-        setAuthChecked(true);
-        return;
-      }
-
-      const { data } = await client.auth.getSession();
-      if (!mounted) return;
-      setSession(data.session);
-      if (data.session && localStorage.getItem('shinecab_onboarding_v3_seen') === 'true') {
-        setOnboardingDone(true);
-      }
-      setAuthChecked(true);
-
-      const {
-        data: { subscription },
-      } = client.auth.onAuthStateChange((_event, nextSession) => {
-        setSession(nextSession);
-        if (nextSession) {
-          setGuestMode(false);
-        }
-      });
-
-      return () => {
-        subscription.unsubscribe();
-      };
+    loadAppConfig().then((cfg) => {
+      if (mounted) setConfig(cfg);
     });
-
     return () => {
       mounted = false;
     };
   }, []);
 
-  const loadCustomerData = useCallback(async () => {
-    if (!supabase || !session?.user) return;
+  // Listen to Firebase Auth state
+  useEffect(() => {
+    const unsub = onAuthStateChanged(auth, (user) => {
+      setFirebaseUser(user);
+      setAuthChecked(true);
+      if (!user) {
+        setUserProfile(null);
+        setUserDocLoaded(false);
+        setRides([]);
+        setScheduledRides([]);
+        setSavedAddresses([]);
+        setEmergencyContacts([]);
+        setPayments([]);
+        setUserNotifications([]);
+        setTickets([]);
+        setSosAlerts([]);
+        setCouponUsage([]);
+        setLiveConnected(false);
+      } else if (localStorage.getItem('shinecab_onboarding_v3_seen') === 'true') {
+        setOnboardingDone(true);
+      }
+    });
+    return () => unsub();
+  }, []);
+
+  // Subscribe to public/shared active coupons & live_notifications
+  useEffect(() => {
+    const unsubCoupons = onSnapshot(
+      collection(db, 'coupons'),
+      (snap) => {
+        const now = Date.now();
+        const activeList = snap.docs
+          .map((d) => ({ id: d.id, ...(d.data() as Record<string, any>) }) as Coupon & { is_active?: boolean })
+          .filter((c) => {
+            if (c.is_active === false) return false;
+            if (c.expires_at && new Date(c.expires_at).getTime() <= now) return false;
+            return true;
+          });
+        setCoupons(activeList);
+      },
+      (err) => console.error('Coupons listener error:', err)
+    );
+
+    const unsubAlerts = onSnapshot(
+      collection(db, 'live_notifications'),
+      (snap) => {
+        const alerts = snap.docs
+          .map((d) => {
+            const raw = d.data() as Record<string, any>;
+            return {
+              id: d.id,
+              title: String(raw.title || 'SHINE CAB Alert'),
+              message: String(raw.message || raw.body || ''),
+              targetAudience: String(raw.targetAudience || raw.target_audience || 'all'),
+              active: raw.active !== false,
+              actionLink: raw.actionLink || raw.action_link || null,
+              created_at:
+                typeof raw.created_at === 'string'
+                  ? raw.created_at
+                  : raw.created_at?.toDate?.()?.toISOString?.() || new Date().toISOString(),
+            } as LiveNotificationAlert;
+          })
+          .filter(
+            (a) =>
+              a.active === true &&
+              ['all', 'customers', 'customer'].includes((a.targetAudience || 'all').toLowerCase())
+          );
+        setLiveAlerts(sortByDateDesc(alerts));
+        setLiveConnected(true);
+      },
+      (err) => {
+        console.error('live_notifications listener error:', err);
+      }
+    );
+
+    return () => {
+      unsubCoupons();
+      unsubAlerts();
+    };
+  }, [refreshTick]);
+
+  // Subscribe to authenticated customer's Firestore collections in real time
+  useEffect(() => {
+    const uid = firebaseUser?.uid;
+    if (!uid) return;
+
     setDataLoading(true);
-    try {
-      const uid = session.user.id;
-      const [{ data: uRow }, { data: cRow }] = await Promise.all([
-        supabase.from('users').select('*').eq('id', uid).maybeSingle(),
-        supabase.from('customers').select('*').eq('user_id', uid).maybeSingle(),
-      ]);
+    const unsubscribers: (() => void)[] = [];
 
-      let resolvedCustomer = cRow as CustomerProfile | null;
-      if (!uRow) {
-        await supabase.from('users').upsert(
-          {
-            id: uid,
-            phone: session.user.phone || session.user.email || uid,
-            email: session.user.email || null,
-            role: 'customer',
-          },
-          { onConflict: 'id' }
-        );
-      }
-      if (!resolvedCustomer) {
-        const { data: created } = await supabase
-          .from('customers')
-          .upsert({ user_id: uid }, { onConflict: 'user_id' })
-          .select('*')
-          .single();
-        resolvedCustomer = created as CustomerProfile | null;
-      }
-
-      setUserProfile((uRow as UserProfile | null) || null);
-      setCustomerProfile(resolvedCustomer);
-
-      const cid = resolvedCustomer?.id;
-      if (!cid) return;
-
-      const [
-        ridesRes,
-        schedRes,
-        addrRes,
-        contactsRes,
-        couponsRes,
-        usageRes,
-        payRes,
-        notifRes,
-        ticketsRes,
-        sosRes,
-      ] = await Promise.all([
-        supabase
-          .from('rides')
-          .select(
-            `*, vehicle_categories(name, slug), drivers(id, rating_avg, current_lat, current_lng, current_heading, users(full_name, avatar_url, phone)), vehicles(id, make, model, color, registration_number), ratings(id, overall_rating, feedback)`
-          )
-          .eq('customer_id', cid)
-          .order('created_at', { ascending: false })
-          .limit(50),
-        supabase
-          .from('scheduled_rides')
-          .select('*, vehicle_categories(name, slug)')
-          .eq('customer_id', cid)
-          .order('scheduled_for', { ascending: true }),
-        supabase.from('saved_addresses').select('*').eq('customer_id', cid).order('created_at'),
-        supabase.from('emergency_contacts').select('*').eq('customer_id', cid).order('created_at'),
-        supabase
-          .from('coupons')
-          .select('*')
-          .eq('is_active', true)
-          .gt('expires_at', new Date().toISOString()),
-        supabase
-          .from('coupon_usage')
-          .select('id, discount_applied, used_at, coupons(code, title)')
-          .eq('customer_id', cid)
-          .order('used_at', { ascending: false }),
-        supabase
-          .from('payments')
-          .select('*')
-          .eq('customer_id', cid)
-          .order('created_at', { ascending: false }),
-        supabase
-          .from('notifications')
-          .select('*')
-          .eq('user_id', uid)
-          .order('created_at', { ascending: false })
-          .limit(40),
-        supabase
-          .from('support_tickets')
-          .select('*')
-          .eq('customer_id', cid)
-          .order('created_at', { ascending: false }),
-        supabase
-          .from('sos_alerts')
-          .select('*')
-          .eq('customer_id', cid)
-          .order('created_at', { ascending: false }),
-      ]);
-
-      const fetchedRides = (ridesRes.data as RideRecord[]) || [];
-      setRides(fetchedRides);
-      const currentActive =
-        fetchedRides.find((r) =>
-          [
-            'searching_driver',
-            'driver_assigned',
-            'driver_arriving',
-            'driver_reached_pickup',
-            'otp_verification',
-            'ride_started',
-            'ride_completed',
-            'payment_pending',
-          ].includes(r.status)
-        ) || null;
-      setActiveRide(currentActive);
-
-      setScheduledRides((schedRes.data as ScheduledRide[]) || []);
-      setSavedAddresses((addrRes.data as SavedAddress[]) || []);
-      setEmergencyContacts((contactsRes.data as EmergencyContact[]) || []);
-      setCoupons((couponsRes.data as Coupon[]) || []);
-      setCouponUsage(usageRes.data || []);
-      setPayments((payRes.data as PaymentRecord[]) || []);
-      setNotifications((notifRes.data as NotificationRecord[]) || []);
-      setTickets((ticketsRes.data as SupportTicket[]) || []);
-      setSosAlerts((sosRes.data as SosAlertRecord[]) || []);
-    } finally {
-      setDataLoading(false);
-    }
-  }, [supabase, session?.user]);
-
-  useEffect(() => {
-    if (session?.user) {
-      loadCustomerData();
-    } else {
-      fetch('/api/vehicles/home-summary')
-        .then((r) => (r.ok ? r.json() : null))
-        .then((data) => {
-          if (data?.activeOffers) {
-            setCoupons(data.activeOffers as Coupon[]);
+    // 1. User profile doc
+    unsubscribers.push(
+      onSnapshot(
+        doc(db, 'users', uid),
+        (snap) => {
+          if (snap.exists()) {
+            const data = snap.data() as Record<string, any>;
+            setUserProfile({
+              id: uid,
+              uid,
+              phone: String(data.phone || firebaseUser.phoneNumber || ''),
+              email: data.email || null,
+              full_name: data.full_name || null,
+              short_id:
+                data.short_id ||
+                generateShortCustomerId(String(data.phone || ''), data.full_name || null),
+              avatar_url: data.avatar_url || null,
+              language_preference: String(data.language_preference || 'en'),
+              created_at:
+                typeof data.created_at === 'string'
+                  ? data.created_at
+                  : data.created_at?.toDate?.()?.toISOString?.() || new Date().toISOString(),
+              ...data,
+            } as UserProfile & Record<string, any>);
+          } else {
+            setUserProfile(null);
           }
-        })
-        .catch(() => {
-          // ignore network errors cleanly
+          setUserDocLoaded(true);
+          setDataLoading(false);
+        },
+        (err) => {
+          console.error('User doc listener error:', err);
+          setUserDocLoaded(true);
+          setDataLoading(false);
+        }
+      )
+    );
+
+    // 2. Rides (real-time status transitions & driver assignments)
+    unsubscribers.push(
+      onSnapshot(
+        query(collection(db, 'rides'), where('customer_uid', '==', uid)),
+        (snap) => {
+          const list = snap.docs.map((d) => {
+            const raw = d.data() as Record<string, any>;
+            return {
+              id: d.id,
+              ...raw,
+              created_at:
+                typeof raw.created_at === 'string'
+                  ? raw.created_at
+                  : raw.created_at?.toDate?.()?.toISOString?.() || new Date().toISOString(),
+            } as RideRecord;
+          });
+          setRides(sortByDateDesc(list));
+          setLiveConnected(true);
+        },
+        (err) => console.error('Rides listener error:', err)
+      )
+    );
+
+    // 3. Scheduled rides
+    unsubscribers.push(
+      onSnapshot(
+        query(collection(db, 'scheduled_rides'), where('customer_uid', '==', uid)),
+        (snap) => {
+          const list = snap.docs.map(
+            (d) => ({ id: d.id, ...(d.data() as Record<string, any>) }) as ScheduledRide
+          );
+          list.sort(
+            (a, b) =>
+              new Date(a.scheduled_for || 0).getTime() - new Date(b.scheduled_for || 0).getTime()
+          );
+          setScheduledRides(list);
+        },
+        (err) => console.error('Scheduled rides listener error:', err)
+      )
+    );
+
+    // 4. Saved addresses
+    unsubscribers.push(
+      onSnapshot(
+        query(collection(db, 'saved_addresses'), where('customer_uid', '==', uid)),
+        (snap) => {
+          const list = snap.docs.map(
+            (d) => ({ id: d.id, ...(d.data() as Record<string, any>) }) as SavedAddress
+          );
+          setSavedAddresses(list);
+        },
+        (err) => console.error('Saved addresses listener error:', err)
+      )
+    );
+
+    // 5. Emergency contacts
+    unsubscribers.push(
+      onSnapshot(
+        query(collection(db, 'emergency_contacts'), where('customer_uid', '==', uid)),
+        (snap) => {
+          const list = snap.docs.map(
+            (d) => ({ id: d.id, ...(d.data() as Record<string, any>) }) as EmergencyContact
+          );
+          setEmergencyContacts(list);
+        },
+        (err) => console.error('Emergency contacts listener error:', err)
+      )
+    );
+
+    // 6. Payments
+    unsubscribers.push(
+      onSnapshot(
+        query(collection(db, 'payments'), where('customer_uid', '==', uid)),
+        (snap) => {
+          const list = snap.docs.map(
+            (d) => ({ id: d.id, ...(d.data() as Record<string, any>) }) as PaymentRecord
+          );
+          setPayments(sortByDateDesc(list));
+        },
+        (err) => console.error('Payments listener error:', err)
+      )
+    );
+
+    // 7. Personal notifications
+    unsubscribers.push(
+      onSnapshot(
+        query(collection(db, 'user_notifications'), where('user_id', '==', uid)),
+        (snap) => {
+          const list = snap.docs.map(
+            (d) => ({ id: d.id, ...(d.data() as Record<string, any>) }) as NotificationRecord
+          );
+          setUserNotifications(sortByDateDesc(list));
+        },
+        (err) => console.error('User notifications listener error:', err)
+      )
+    );
+
+    // 8. Support tickets
+    unsubscribers.push(
+      onSnapshot(
+        query(collection(db, 'support_tickets'), where('customer_uid', '==', uid)),
+        (snap) => {
+          const list = snap.docs.map(
+            (d) => ({ id: d.id, ...(d.data() as Record<string, any>) }) as SupportTicket
+          );
+          setTickets(sortByDateDesc(list));
+        },
+        (err) => console.error('Support tickets listener error:', err)
+      )
+    );
+
+    // 9. SOS alerts
+    unsubscribers.push(
+      onSnapshot(
+        query(collection(db, 'sos_alerts'), where('customer_uid', '==', uid)),
+        (snap) => {
+          const list = snap.docs.map(
+            (d) => ({ id: d.id, ...(d.data() as Record<string, any>) }) as SosAlertRecord
+          );
+          setSosAlerts(sortByDateDesc(list));
+        },
+        (err) => console.error('SOS alerts listener error:', err)
+      )
+    );
+
+    // 10. Coupon usage history
+    unsubscribers.push(
+      onSnapshot(
+        query(collection(db, 'coupon_usage'), where('customer_uid', '==', uid)),
+        (snap) => {
+          const list: Record<string, any>[] = snap.docs.map((d) => ({
+            id: d.id,
+            ...(d.data() as Record<string, any>),
+          }));
+          list.sort(
+            (a, b) => new Date(b.used_at || 0).getTime() - new Date(a.used_at || 0).getTime()
+          );
+          setCouponUsage(list);
+        },
+        (err) => console.error('Coupon usage listener error:', err)
+      )
+    );
+
+    return () => {
+      unsubscribers.forEach((unsub) => unsub());
+    };
+  }, [firebaseUser?.uid, firebaseUser?.phoneNumber, refreshTick]);
+
+  // Derive activeRide dynamically from Firestore rides
+  const activeRide = useMemo(() => {
+    return (
+      rides.find(
+        (r) => ACTIVE_RIDE_STATUSES.has(r.status) && !dismissedRideIds.includes(r.id)
+      ) || null
+    );
+  }, [rides, dismissedRideIds]);
+
+  // Live driver GPS subscription whenever activeRide has an assigned driver_id
+  useEffect(() => {
+    if (!activeRide?.driver_id) {
+      setDriverDocTracking(null);
+      return;
+    }
+
+    const unsub = onSnapshot(
+      doc(db, 'drivers', activeRide.driver_id),
+      (snap) => {
+        if (!snap.exists()) return;
+        const d = snap.data() as Record<string, any>;
+        const lat = Number(d.current_lat ?? d.lat);
+        const lng = Number(d.current_lng ?? d.lng);
+        if (!Number.isFinite(lat) || !Number.isFinite(lng)) return;
+
+        setDriverDocTracking({
+          id: snap.id,
+          ride_id: activeRide.id,
+          driver_id: activeRide.driver_id!,
+          lat,
+          lng,
+          heading: Number(d.current_heading ?? d.heading ?? 0),
+          speed_kmh: Number(d.speed_kmh ?? 0),
+          eta_seconds: d.eta_seconds ?? null,
+          distance_remaining_meters: d.distance_remaining_meters ?? null,
+          recorded_at: new Date().toISOString(),
         });
+      },
+      (err) => console.error('Live driver GPS listener error:', err)
+    );
+
+    return () => unsub();
+  }, [activeRide?.id, activeRide?.driver_id]);
+
+  // Resolved live tracking (prefers live driver doc, falls back to ride.drivers coords)
+  const liveTracking: RideTrackingPoint | null = useMemo(() => {
+    if (driverDocTracking) return driverDocTracking;
+    if (
+      activeRide?.driver_id &&
+      activeRide.drivers?.current_lat != null &&
+      activeRide.drivers?.current_lng != null
+    ) {
+      return {
+        id: activeRide.driver_id,
+        ride_id: activeRide.id,
+        driver_id: activeRide.driver_id,
+        lat: activeRide.drivers.current_lat,
+        lng: activeRide.drivers.current_lng,
+        heading: activeRide.drivers.current_heading || 0,
+        speed_kmh: 0,
+        eta_seconds: null,
+        distance_remaining_meters: null,
+        recorded_at: new Date().toISOString(),
+      };
     }
-  }, [session?.user, loadCustomerData]);
+    return null;
+  }, [driverDocTracking, activeRide]);
 
-  // Real-time subscriptions via Supabase Realtime + WebSocket channel
-  useEffect(() => {
-    if (!supabase || !session?.user || !customerProfile?.id) return;
-
-    const notifChannel = supabase
-      .channel(`user-notif-${session.user.id}`)
-      .on(
-        'postgres_changes',
-        {
-          event: 'INSERT',
-          schema: 'public',
-          table: 'notifications',
-          filter: `user_id=eq.${session.user.id}`,
-        },
-        (payload) => {
-          const item = payload.new as NotificationRecord;
-          setNotifications((prev) =>
-            prev.some((existing) => existing.id === item.id) ? prev : [item, ...prev]
-          );
-          setLiveToast(item);
-        }
-      )
-      .subscribe();
-
-    const ridesChannel = supabase
-      .channel(`customer-rides-${customerProfile.id}`)
-      .on(
-        'postgres_changes',
-        {
-          event: '*',
-          schema: 'public',
-          table: 'rides',
-          filter: `customer_id=eq.${customerProfile.id}`,
-        },
-        () => {
-          loadCustomerData();
-        }
-      )
-      .subscribe();
-
-    return () => {
-      supabase.removeChannel(notifChannel);
-      supabase.removeChannel(ridesChannel);
+  // Derived CustomerProfile for ProfileView preferences
+  const customerProfile: CustomerProfile | null = useMemo(() => {
+    if (!firebaseUser) return null;
+    const raw = (userProfile || {}) as Record<string, any>;
+    return {
+      id: firebaseUser.uid,
+      user_id: firebaseUser.uid,
+      preferred_payment_method: (raw.preferred_payment_method as PaymentMethod) || 'upi',
+      notification_push_enabled: raw.notification_push_enabled ?? true,
+      notification_sms_enabled: raw.notification_sms_enabled ?? true,
+      notification_promo_enabled: raw.notification_promo_enabled ?? true,
+      fcm_token: raw.fcm_token || null,
+      total_rides: rides.length,
+      rating_avg: Number(raw.rating_avg || 5.0),
     };
-  }, [supabase, session?.user, customerProfile?.id, loadCustomerData]);
+  }, [firebaseUser, userProfile, rides.length]);
 
-  // Real-time WebSocket stream for live notifications & ride alerts (active for all visitors)
-  useEffect(() => {
-    if (typeof window === 'undefined') {
-      setWsLive(false);
-      return;
-    }
+  // Merge admin live_notifications broadcasts + per-user notifications
+  const mergedNotifications: NotificationRecord[] = useMemo(() => {
+    const broadcastItems: NotificationRecord[] = liveAlerts.map((a) => ({
+      id: `broadcast:${a.id}`,
+      notification_type: 'live_broadcast',
+      title: a.title,
+      body: a.message,
+      deep_link: a.actionLink || null,
+      is_read: readBroadcastIds.includes(a.id),
+      created_at: a.created_at,
+    }));
+    return sortByDateDesc([...broadcastItems, ...userNotifications]);
+  }, [liveAlerts, userNotifications, readBroadcastIds]);
 
-    const userId = session?.user?.id || null;
-    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const ws = new WebSocket(`${protocol}//${window.location.host}/ws`);
+  const unreadCount = useMemo(
+    () => mergedNotifications.filter((n) => !n.is_read).length,
+    [mergedNotifications]
+  );
 
-    ws.onopen = () => {
-      setWsLive(true);
-      ws.send(JSON.stringify({ type: 'subscribe', channel: 'updates:live' }));
-      if (userId) {
-        ws.send(JSON.stringify({ type: 'subscribe', channel: `user:${userId}` }));
-      }
-    };
+  // Active top dismissible Live Alert Banner
+  const topBannerAlert = useMemo(() => {
+    return liveAlerts.find((a) => !dismissedBannerIds.includes(a.id)) || null;
+  }, [liveAlerts, dismissedBannerIds]);
 
-    ws.onmessage = (event) => {
+  const persistReadBroadcast = (rawAlertId: string) => {
+    setReadBroadcastIds((prev) => {
+      if (prev.includes(rawAlertId)) return prev;
+      const next = [...prev, rawAlertId];
       try {
-        const frame = JSON.parse(event.data);
-        if (frame?.event === 'notification:new' && frame.payload) {
-          const item = frame.payload as NotificationRecord;
-          setNotifications((prev) =>
-            prev.some((existing) => existing.id === item.id) ? prev : [item, ...prev]
-          );
-          setLiveToast(item);
-        }
+        localStorage.setItem('shinecab_read_broadcasts', JSON.stringify(next));
       } catch {
-        // Ignore malformed WebSocket frames
+        // ignore storage errors
       }
-    };
-
-    ws.onclose = () => {
-      setWsLive(false);
-    };
-
-    ws.onerror = () => {
-      setWsLive(false);
-    };
-
-    return () => {
-      try {
-        if (ws.readyState === WebSocket.OPEN) {
-          ws.send(JSON.stringify({ type: 'unsubscribe', channel: 'updates:live' }));
-          if (userId) {
-            ws.send(JSON.stringify({ type: 'unsubscribe', channel: `user:${userId}` }));
-          }
-        }
-        ws.close();
-      } catch {
-        // Ignore cleanup errors
-      }
-    };
-  }, [session?.user?.id]);
-
-  // Auto-dismiss live notification toast after 6 seconds
-  useEffect(() => {
-    if (!liveToast) return;
-    const timer = window.setTimeout(() => setLiveToast(null), 6000);
-    return () => window.clearTimeout(timer);
-  }, [liveToast]);
-
-  // Live driver GPS tracking channel for the active ride
-  useEffect(() => {
-    if (!supabase || !activeRide?.id) {
-      setLiveTracking(null);
-      return;
-    }
-
-    const trackingChannel = supabase
-      .channel(`ride-track-${activeRide.id}`)
-      .on(
-        'postgres_changes',
-        {
-          event: 'INSERT',
-          schema: 'public',
-          table: 'ride_tracking',
-          filter: `ride_id=eq.${activeRide.id}`,
-        },
-        (payload) => {
-          setLiveTracking(payload.new as RideTrackingPoint);
-        }
-      )
-      .subscribe();
-
-    return () => {
-      supabase.removeChannel(trackingChannel);
-    };
-  }, [supabase, activeRide?.id]);
+      return next;
+    });
+  };
 
   const handleMarkNotificationRead = async (id: string) => {
-    setNotifications((prev) => prev.map((n) => (n.id === id ? { ...n, is_read: true } : n)));
-    if (supabase && session?.user) {
-      await supabase.from('notifications').update({ is_read: true }).eq('id', id);
+    if (id.startsWith('broadcast:')) {
+      persistReadBroadcast(id.replace('broadcast:', ''));
+      return;
+    }
+    setUserNotifications((prev) => prev.map((n) => (n.id === id ? { ...n, is_read: true } : n)));
+    try {
+      await updateDoc(doc(db, 'user_notifications', id), { is_read: true });
+    } catch {
+      // ignore if already removed
     }
   };
 
   const handleMarkAllRead = async () => {
-    setNotifications((prev) => prev.map((n) => ({ ...n, is_read: true })));
-    if (supabase && session?.user) {
-      await supabase.from('notifications').update({ is_read: true }).eq('user_id', session.user.id);
+    // Mark all broadcasts read
+    liveAlerts.forEach((a) => persistReadBroadcast(a.id));
+
+    // Mark all user_notifications read
+    const unreadUserNotifs = userNotifications.filter((n) => !n.is_read);
+    setUserNotifications((prev) => prev.map((n) => ({ ...n, is_read: true })));
+    if (unreadUserNotifs.length > 0) {
+      try {
+        const batch = writeBatch(db);
+        unreadUserNotifs.forEach((n) => {
+          batch.update(doc(db, 'user_notifications', n.id), { is_read: true });
+        });
+        await batch.commit();
+      } catch {
+        // ignore batch failure
+      }
     }
   };
+
+  const handleNavigateDeepLink = useCallback((link: string) => {
+    const clean = (link || '').trim().toLowerCase();
+    if (!clean) return;
+    if (clean.includes('chat')) setActiveTab('chat');
+    else if (clean.includes('rides')) setActiveTab('rides');
+    else if (clean.includes('support')) setActiveTab('support');
+    else if (clean.includes('offer')) setActiveTab('offers');
+    else if (clean.includes('profile')) setActiveTab('profile');
+    else if (clean.includes('notif')) setActiveTab('notifications');
+    else setActiveTab('home');
+  }, []);
 
   const handleOnboardingComplete = (target: 'get_started' | 'login') => {
     setAuthInitialMode(target === 'get_started' ? 'signup' : 'login');
@@ -432,52 +590,24 @@ export default function App() {
     setOnboardingDone(true);
   };
 
-  const openAuthScreen = (mode: 'login' | 'signup' = 'login') => {
-    setAuthInitialMode(mode);
-    setGuestMode(false);
-  };
+  const recentDestinations: LocationPoint[] = useMemo(
+    () =>
+      rides.slice(0, 5).map((r) => ({
+        address: r.drop_address,
+        lat: r.drop_lat,
+        lng: r.drop_lng,
+      })),
+    [rides]
+  );
 
-  const recentDestinations: LocationPoint[] = rides
-    .slice(0, 5)
-    .map((r) => ({
-      address: r.drop_address,
-      lat: r.drop_lat,
-      lng: r.drop_lng,
-    }));
-
-  const unreadCount = notifications.filter((n) => !n.is_read).length;
-
-  const quotaBanner = quotaExceeded ? (
-    <div className="bg-amber-50 border-b border-amber-200 text-amber-900 px-3 py-2 text-[11px] text-center shrink-0 z-50">
-      <span>
-        Google Maps Platform quota reached. If you are the app owner, visit{' '}
-        <a
-          href="https://developers.google.com/maps/ai/ai-studio?utm_campaign=gmp_mcp_codeassist_v1_aistudio#quota_exceeded_errors"
-          target="_blank"
-          rel="noopener noreferrer"
-          className="underline font-semibold text-amber-950"
-        >
-          maps developer site
-        </a>
-        .
-      </span>
-    </div>
-  ) : null;
-
-  if (!config || !authChecked) {
+  if (!config || !authChecked || showSplash) {
     return (
       <PhoneFrame darkScreen>
-        {quotaBanner}
-        <SplashScreen onFinished={() => {}} />
-      </PhoneFrame>
-    );
-  }
-
-  if (showSplash) {
-    return (
-      <PhoneFrame darkScreen>
-        {quotaBanner}
-        <SplashScreen onFinished={() => setShowSplash(false)} />
+        <SplashScreen
+          onFinished={() => {
+            setShowSplash(false);
+          }}
+        />
       </PhoneFrame>
     );
   }
@@ -485,10 +615,25 @@ export default function App() {
   if (shareToken) {
     return (
       <PhoneFrame>
-        {quotaBanner}
+        {gmpQuotaExceeded && (
+          <div className="bg-amber-50 border-b border-amber-200 text-amber-900 px-4 py-2.5 text-xs md:text-sm text-center sticky top-0 z-50 shadow-sm">
+            <span>
+              Google Maps Platform quota reached. If you are the app owner, visit{' '}
+              <a
+                href="https://developers.google.com/maps/ai/ai-studio?utm_campaign=gmp_mcp_codeassist_v1_aistudio#quota_exceeded_errors"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="underline font-semibold text-amber-950 hover:text-amber-800"
+              >
+                maps developer site
+              </a>{' '}
+              for instructions to update your account.
+            </span>
+          </div>
+        )}
         <SharedTripView
           token={shareToken}
-          config={config}
+          googleMapsApiKey={config.googleMapsApiKey}
           onExitShare={() => {
             window.history.replaceState({}, '', '/');
             setShareToken(null);
@@ -501,27 +646,30 @@ export default function App() {
   if (!onboardingDone) {
     return (
       <PhoneFrame darkScreen>
-        {quotaBanner}
         <OnboardingScreen onComplete={handleOnboardingComplete} />
       </PhoneFrame>
     );
   }
 
-  if (!session && !guestMode) {
+  // Mandatory Login / Sign Up or Profile Completion when not registered yet
+  if (!firebaseUser || !userProfile) {
+    const needsGooglePhone =
+      firebaseUser &&
+      userDocLoaded &&
+      !userProfile &&
+      !firebaseUser.isAnonymous &&
+      !firebaseUser.phoneNumber
+        ? firebaseUser
+        : null;
+
     return (
-      <PhoneFrame>
-        {quotaBanner}
+      <PhoneFrame topBarDark bottomBarDark={false}>
         <OfflineIndicator />
         <AuthScreen
-          config={config}
-          supabase={supabase}
           initialMode={authInitialMode}
+          pendingGoogleUser={needsGooglePhone}
           onAuthenticated={() => {
-            setGuestMode(false);
-            loadCustomerData();
-          }}
-          onSkipToHome={() => {
-            setGuestMode(true);
+            setRefreshTick((t) => t + 1);
             setActiveTab('home');
           }}
           onReplayOnboarding={() => setOnboardingDone(false)}
@@ -530,52 +678,31 @@ export default function App() {
     );
   }
 
-  const renderGuestAuthPrompt = (title: string, subtitle: string) => (
-    <div className="flex-1 flex items-center justify-center p-5">
-      <div className="w-full bg-white border border-neutral-200 rounded-3xl p-6 text-center space-y-5 shadow-sm">
-        <div className="w-12 h-12 rounded-2xl bg-[#FFC928] text-[#111111] flex items-center justify-center mx-auto">
-          <User className="w-6 h-6" />
-        </div>
-        <div className="space-y-1.5">
-          <h2 className="font-display text-lg font-bold text-[#111111]">{title}</h2>
-          <p className="text-xs text-[#737373] leading-relaxed">{subtitle}</p>
-        </div>
-        <div className="grid grid-cols-2 gap-2.5">
-          <button
-            type="button"
-            onClick={() => openAuthScreen('login')}
-            className="min-h-[44px] rounded-xl bg-[#FFC928] text-[#111111] font-semibold text-sm hover:brightness-95 transition cursor-pointer"
-          >
-            Login
-          </button>
-          <button
-            type="button"
-            onClick={() => openAuthScreen('signup')}
-            className="min-h-[44px] rounded-xl bg-[#111111] text-white font-semibold text-sm hover:bg-neutral-800 transition cursor-pointer"
-          >
-            Sign Up
-          </button>
-        </div>
-        <button
-          type="button"
-          onClick={() => setActiveTab('home')}
-          className="text-xs font-semibold text-[#737373] hover:text-[#111111] min-h-[40px] cursor-pointer"
-        >
-          Back to Home Map
-        </button>
-      </div>
-    </div>
-  );
-
   const isFixedViewportTab = activeTab === 'home' || activeTab === 'chat';
 
-  const mainShell = (
+  return (
     <PhoneFrame>
-      {quotaBanner}
       <OfflineIndicator />
 
+      {gmpQuotaExceeded && (
+        <div className="bg-amber-50 border-b border-amber-200 text-amber-900 px-4 py-2.5 text-xs md:text-sm text-center sticky top-0 z-50 shadow-sm shrink-0">
+          <span>
+            Google Maps Platform quota reached. If you are the app owner, visit{' '}
+            <a
+              href="https://developers.google.com/maps/ai/ai-studio?utm_campaign=gmp_mcp_codeassist_v1_aistudio#quota_exceeded_errors"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="underline font-semibold text-amber-950 hover:text-amber-800"
+            >
+              maps developer site
+            </a>{' '}
+            for instructions to update your account.
+          </span>
+        </div>
+      )}
+
       {/* Phone Top App Bar — Compact 52px */}
-      <header className="h-[54px] bg-white border-b border-neutral-200 px-3.5 flex items-center justify-between gap-2 shrink-0 z-30">
+      <header className="h-[52px] bg-white border-b border-neutral-200 px-3.5 flex items-center justify-between gap-2 shrink-0 z-30">
         <button
           type="button"
           onClick={() => setActiveTab('home')}
@@ -614,7 +741,7 @@ export default function App() {
             }`}
           >
             <Bell className="w-5 h-5" />
-            {wsLive && unreadCount === 0 && (
+            {liveConnected && unreadCount === 0 && (
               <span className="absolute top-2.5 right-2.5 w-2 h-2 rounded-full bg-[#16A34A]" />
             )}
             {unreadCount > 0 && (
@@ -624,37 +751,86 @@ export default function App() {
             )}
           </button>
 
-          {session ? (
-            <button
-              type="button"
-              onClick={() => setActiveTab('profile')}
-              aria-label="Open profile"
-              className="min-h-[44px] min-w-[44px] flex items-center justify-center cursor-pointer"
-            >
-              <span className="w-8 h-8 rounded-full bg-[#111111] text-[#FFC928] font-display text-xs font-bold flex items-center justify-center overflow-hidden">
-                {userProfile?.avatar_url ? (
-                  <img
-                    src={userProfile.avatar_url}
-                    alt={userProfile.full_name || 'Customer'}
-                    referrerPolicy="no-referrer"
-                    className="w-full h-full object-cover"
-                  />
-                ) : (
-                  (userProfile?.full_name || userProfile?.phone || 'U').charAt(0).toUpperCase()
-                )}
-              </span>
-            </button>
-          ) : (
-            <button
-              type="button"
-              onClick={() => openAuthScreen('login')}
-              className="min-h-[38px] px-3 rounded-xl bg-[#FFC928] text-[#111111] text-xs font-bold hover:brightness-95 transition cursor-pointer whitespace-nowrap"
-            >
-              Login
-            </button>
-          )}
+          <button
+            type="button"
+            onClick={() => setActiveTab('profile')}
+            aria-label="Open profile"
+            className="min-h-[44px] min-w-[44px] flex items-center justify-center cursor-pointer"
+          >
+            <span className="w-8 h-8 rounded-full bg-[#111111] text-[#FFC928] font-display text-xs font-bold flex items-center justify-center overflow-hidden">
+              {userProfile?.avatar_url ? (
+                <img
+                  src={userProfile.avatar_url}
+                  alt={userProfile.full_name || 'Customer'}
+                  referrerPolicy="no-referrer"
+                  className="w-full h-full object-cover"
+                />
+              ) : (
+                (userProfile?.full_name || userProfile?.phone || 'U').charAt(0).toUpperCase()
+              )}
+            </span>
+          </button>
         </div>
       </header>
+
+      {/* Dismissible Admin Live Alert Banner (from Firestore live_notifications) */}
+      {topBannerAlert && (
+        <div
+          role="region"
+          aria-label="Live alert announcement"
+          className="bg-[#111111] text-white px-3 py-2.5 border-b border-neutral-800 flex items-start gap-2.5 shrink-0 z-25"
+        >
+          <div className="w-7 h-7 rounded-lg bg-[#FFC928] text-[#111111] flex items-center justify-center shrink-0 mt-0.5">
+            <Megaphone className="w-4 h-4" />
+          </div>
+          <div className="min-w-0 flex-1">
+            <p className="text-xs font-bold text-[#FFC928] truncate">{topBannerAlert.title}</p>
+            <p className="text-[11px] text-neutral-200 line-clamp-2 leading-snug">
+              {topBannerAlert.message}
+            </p>
+            {topBannerAlert.actionLink && (
+              <div className="mt-1.5">
+                {topBannerAlert.actionLink.startsWith('http://') ||
+                topBannerAlert.actionLink.startsWith('https://') ? (
+                  <a
+                    href={topBannerAlert.actionLink}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    onClick={() => persistReadBroadcast(topBannerAlert.id)}
+                    className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-[#FFC928] text-[#111111] text-[11px] font-bold hover:brightness-95"
+                  >
+                    <span>Open Link</span>
+                    <ExternalLink className="w-3 h-3" />
+                  </a>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      persistReadBroadcast(topBannerAlert.id);
+                      handleNavigateDeepLink(topBannerAlert.actionLink!);
+                    }}
+                    className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-[#FFC928] text-[#111111] text-[11px] font-bold hover:brightness-95 cursor-pointer"
+                  >
+                    <span>View Now</span>
+                    <ArrowRight className="w-3 h-3" />
+                  </button>
+                )}
+              </div>
+            )}
+          </div>
+          <button
+            type="button"
+            onClick={() => {
+              persistReadBroadcast(topBannerAlert.id);
+              setDismissedBannerIds((prev) => [...prev, topBannerAlert.id]);
+            }}
+            aria-label="Dismiss alert banner"
+            className="min-h-[32px] min-w-[32px] flex items-center justify-center text-neutral-400 hover:text-white cursor-pointer shrink-0"
+          >
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+      )}
 
       {/* Main Phone Content Stage */}
       <main
@@ -664,32 +840,25 @@ export default function App() {
       >
         {activeTab === 'home' && (
           <HomeBookingView
-            config={config}
-            supabase={supabase}
-            accessToken={session?.access_token ?? null}
-            customerId={customerProfile?.id || null}
+            googleMapsApiKey={config.googleMapsApiKey}
+            customerUid={firebaseUser.uid}
+            userProfile={userProfile}
             savedAddresses={savedAddresses}
             recentDestinations={recentDestinations}
+            coupons={coupons}
             activeRide={activeRide}
             tracking={liveTracking}
             onRideCreated={(ride) => {
-              setActiveRide(ride);
-              loadCustomerData();
+              setDismissedRideIds((prev) => prev.filter((id) => id !== ride.id));
             }}
             onRideUpdated={(updated) => {
-              setActiveRide(updated);
-              loadCustomerData();
-            }}
-            onTriggerSos={() => {
-              if (!session) {
-                openAuthScreen('login');
-                return;
+              if (!updated && activeRide) {
+                setDismissedRideIds((prev) => [...prev, activeRide.id]);
               }
-              setShowSosModal(true);
             }}
+            onTriggerSos={() => setShowSosModal(true)}
             onNavigateTab={(tab) => setActiveTab(tab)}
             onOpenChat={() => setActiveTab('chat')}
-            onRequireAuth={(mode = 'login') => openAuthScreen(mode)}
             preAppliedCouponCode={preAppliedCoupon}
           />
         )}
@@ -699,8 +868,7 @@ export default function App() {
             rides={rides}
             scheduledRides={scheduledRides}
             loading={dataLoading}
-            supabase={supabase}
-            onRefresh={loadCustomerData}
+            onRefresh={() => setRefreshTick((t) => t + 1)}
             onCreateSupportForRide={(rideId) => {
               setSupportRideId(rideId);
               setActiveTab('support');
@@ -726,32 +894,23 @@ export default function App() {
 
         {activeTab === 'support' && (
           <SupportView
-            supabase={supabase}
-            userId={session?.user?.id || null}
-            customerId={customerProfile?.id || null}
+            userId={firebaseUser.uid}
+            customerId={firebaseUser.uid}
             tickets={tickets}
             preselectedRideId={supportRideId}
-            onTicketsChanged={loadCustomerData}
-            onTriggerSos={() => (session ? setShowSosModal(true) : openAuthScreen('login'))}
+            onTicketsChanged={() => setRefreshTick((t) => t + 1)}
+            onTriggerSos={() => setShowSosModal(true)}
           />
         )}
 
         {activeTab === 'notifications' && (
           <NotificationsView
-            notifications={notifications}
-            wsConnected={wsLive || Boolean(supabase && customerProfile?.id)}
-            isAuthenticated={Boolean(session)}
+            notifications={mergedNotifications}
+            liveConnected={liveConnected}
             onMarkRead={handleMarkNotificationRead}
             onMarkAllRead={handleMarkAllRead}
-            onRefresh={loadCustomerData}
-            onRequireAuth={() => openAuthScreen('login')}
-            onNavigateDeepLink={(link) => {
-              if (link.includes('chat')) setActiveTab('chat');
-              else if (link.includes('rides')) setActiveTab('rides');
-              else if (link.includes('support')) setActiveTab('support');
-              else if (link.includes('offers')) setActiveTab('offers');
-              else setActiveTab('home');
-            }}
+            onRefresh={() => setRefreshTick((t) => t + 1)}
+            onNavigateDeepLink={handleNavigateDeepLink}
           />
         )}
 
@@ -760,61 +919,53 @@ export default function App() {
             rides={rides}
             activeRide={activeRide}
             selectedRideId={selectedChatRideId}
-            accessToken={session?.access_token ?? null}
-            supabase={supabase}
+            customerUid={firebaseUser.uid}
             onSelectRide={(id) => setSelectedChatRideId(id)}
             onBack={() => setActiveTab('home')}
-            onRequireAuth={() => openAuthScreen('login')}
           />
         )}
 
-        {activeTab === 'profile' &&
-          (session ? (
-            <ProfileView
-              config={config}
-              supabase={supabase}
-              accessToken={session.access_token}
-              userProfile={userProfile}
-              customerProfile={customerProfile}
-              rides={rides}
-              scheduledRides={scheduledRides}
-              savedAddresses={savedAddresses}
-              emergencyContacts={emergencyContacts}
-              payments={payments}
-              coupons={coupons}
-              couponUsage={couponUsage}
-              notifications={notifications}
-              tickets={tickets}
-              sosAlerts={sosAlerts}
-              activeRide={activeRide}
-              onRefresh={loadCustomerData}
-              onLoggedOut={() => {
-                setSession(null);
-                setGuestMode(false);
-              }}
-              onNavigateTab={(tab) => setActiveTab(tab)}
-              onApplyCoupon={(code) => {
-                setPreAppliedCoupon(code);
-                setActiveTab('home');
-              }}
-              onTriggerSos={() => setShowSosModal(true)}
-              onReplayOnboarding={() => {
-                localStorage.removeItem('shinecab_onboarding_completed');
-                setOnboardingDone(false);
-              }}
-            />
-          ) : (
-            renderGuestAuthPrompt(
-              'Sign in or create your account',
-              'Manage your profile, saved Home & Office addresses, emergency contacts, and payment history.'
-            )
-          ))}
+        {activeTab === 'profile' && (
+          <ProfileView
+            config={config}
+            customerUid={firebaseUser.uid}
+            userProfile={userProfile}
+            customerProfile={customerProfile}
+            rides={rides}
+            scheduledRides={scheduledRides}
+            savedAddresses={savedAddresses}
+            emergencyContacts={emergencyContacts}
+            payments={payments}
+            coupons={coupons}
+            couponUsage={couponUsage}
+            notifications={mergedNotifications}
+            tickets={tickets}
+            sosAlerts={sosAlerts}
+            activeRide={activeRide}
+            onRefresh={() => setRefreshTick((t) => t + 1)}
+            onLoggedOut={() => {
+              setFirebaseUser(null);
+              setActiveTab('home');
+            }}
+            onNavigateTab={(tab) => setActiveTab(tab)}
+            onApplyCoupon={(code) => {
+              setPreAppliedCoupon(code);
+              setActiveTab('home');
+            }}
+            onTriggerSos={() => setShowSosModal(true)}
+            onReplayOnboarding={() => {
+              localStorage.removeItem('shinecab_onboarding_completed');
+              localStorage.removeItem('shinecab_onboarding_v3_seen');
+              setOnboardingDone(false);
+            }}
+          />
+        )}
       </main>
 
-      {/* Phone 5-Tab Bottom Navigation Bar (Docked Flex Anchor — Zero Overlap) */}
+      {/* Phone 5-Tab Bottom Navigation Bar */}
       <nav
         aria-label="Primary navigation"
-        className="shrink-0 z-30 bg-white/95 backdrop-blur-md border-t border-neutral-200 grid grid-cols-5 h-[60px] pb-safe"
+        className="shrink-0 z-30 bg-white/95 backdrop-blur-md border-t border-neutral-200 grid grid-cols-5 h-[60px]"
       >
         {(
           [
@@ -853,67 +1004,14 @@ export default function App() {
         })}
       </nav>
 
-      {liveToast && (
-        <div
-          role="status"
-          aria-live="polite"
-          className="fixed top-[58px] right-3 left-3 z-40 bg-[#111111] text-white rounded-2xl p-3.5 shadow-xl border border-neutral-800 flex items-start gap-3"
-        >
-          <div className="w-8 h-8 rounded-xl bg-[#FFC928] text-[#111111] flex items-center justify-center shrink-0">
-            <Bell className="w-4 h-4" />
-          </div>
-          <div className="flex-1 min-w-0">
-            <p className="text-xs font-bold text-white truncate">{liveToast.title}</p>
-            <p className="text-[11px] text-neutral-300 mt-0.5 line-clamp-2">{liveToast.body}</p>
-            <div className="mt-2 flex items-center gap-3">
-              <button
-                type="button"
-                onClick={() => {
-                  setActiveTab('notifications');
-                  setLiveToast(null);
-                }}
-                className="text-[11px] font-semibold text-[#FFC928] hover:underline cursor-pointer"
-              >
-                Open Notifications
-              </button>
-              <button
-                type="button"
-                onClick={() => setLiveToast(null)}
-                className="text-[11px] text-neutral-400 hover:text-white cursor-pointer"
-              >
-                Dismiss
-              </button>
-            </div>
-          </div>
-          <button
-            type="button"
-            onClick={() => setLiveToast(null)}
-            aria-label="Close live notification"
-            className="min-h-[36px] min-w-[36px] flex items-center justify-center text-neutral-400 hover:text-white cursor-pointer"
-          >
-            <X className="w-4 h-4" />
-          </button>
-        </div>
-      )}
-
-      {showSosModal && session && (
+      {showSosModal && (
         <EmergencySosModal
           rideId={activeRide?.id}
-          accessToken={session.access_token}
+          customerUid={firebaseUser.uid}
           contacts={emergencyContacts}
           onClose={() => setShowSosModal(false)}
         />
       )}
     </PhoneFrame>
   );
-
-  if (config.services.maps && config.googleMapsApiKey) {
-    return (
-      <APIProvider apiKey={config.googleMapsApiKey} language="en" region="IN">
-        {mainShell}
-      </APIProvider>
-    );
-  }
-
-  return mainShell;
 }

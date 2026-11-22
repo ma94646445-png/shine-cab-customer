@@ -14,18 +14,17 @@ import {
   Search,
   ShieldCheck,
 } from 'lucide-react';
-import { SupabaseClient } from '@supabase/supabase-js';
+import { addDoc, collection, onSnapshot, query, where } from 'firebase/firestore';
+import { db, handleFirestoreError, OperationType } from '../lib/firebase';
 import { RideMessage, RideRecord } from '../types/shinecab';
 
 interface DriverChatViewProps {
   rides: RideRecord[];
   activeRide: RideRecord | null;
   selectedRideId: string | null;
-  accessToken: string | null;
-  supabase: SupabaseClient | null;
+  customerUid: string;
   onSelectRide: (rideId: string) => void;
   onBack: () => void;
-  onRequireAuth?: () => void;
 }
 
 const QUICK_REPLIES = [
@@ -39,11 +38,9 @@ export const DriverChatView: React.FC<DriverChatViewProps> = ({
   rides,
   activeRide,
   selectedRideId,
-  accessToken,
-  supabase,
+  customerUid,
   onSelectRide,
   onBack,
-  onRequireAuth,
 }) => {
   const [mobilePanel, setMobilePanel] = useState<'chat' | 'history'>('chat');
   const [historyQuery, setHistoryQuery] = useState('');
@@ -53,17 +50,14 @@ export const DriverChatView: React.FC<DriverChatViewProps> = ({
   const [text, setText] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [copiedPhone, setCopiedPhone] = useState(false);
-  const [wsLive, setWsLive] = useState(false);
+  const [liveSynced, setLiveSynced] = useState(false);
   const endRef = useRef<HTMLDivElement | null>(null);
 
-  // All rides that have a captain assigned (active first, then newest)
   const driverRides = useMemo(() => {
     const map = new Map<string, RideRecord>();
-    if (activeRide) {
-      map.set(activeRide.id, activeRide);
-    }
+    if (activeRide) map.set(activeRide.id, activeRide);
     for (const r of rides) {
-      if (r.drivers || r.driver_id) {
+      if (r.drivers || r.driver_id || r.id) {
         if (!map.has(r.id)) map.set(r.id, r);
       }
     }
@@ -98,128 +92,79 @@ export const DriverChatView: React.FC<DriverChatViewProps> = ({
   const driverAvatar = driver?.users?.avatar_url || null;
   const vehicleCategoryName = currentRide?.vehicle_categories?.name || 'Cab';
 
-  // Load messages when currentRide or accessToken changes
+  // Real-time Firestore listener on ride_messages
   useEffect(() => {
-    if (!currentRide || !accessToken) {
+    if (!currentRide || !customerUid) {
       setMessages([]);
       setLoading(false);
+      setLiveSynced(false);
       return;
     }
-    let cancelled = false;
+
     setLoading(true);
     setError(null);
-    fetch(`/api/rides/${currentRide.id}/messages`, {
-      headers: { Authorization: `Bearer ${accessToken}` },
-    })
-      .then((r) => r.json().then((d) => ({ ok: r.ok, d })))
-      .then(({ ok, d }) => {
-        if (cancelled) return;
-        if (!ok) {
-          setError(d.error || 'Unable to load chat history.');
-        } else {
-          setMessages(d.messages || []);
+    const q = query(
+      collection(db, 'ride_messages'),
+      where('ride_id', '==', currentRide.id),
+      where('customer_uid', '==', customerUid)
+    );
+
+    const unsub = onSnapshot(
+      q,
+      (snap) => {
+        const rows = snap.docs
+          .map((d) => ({
+            id: d.id,
+            ...(d.data() as Omit<RideMessage, 'id'>),
+          }))
+          .sort((a, b) => a.created_at.localeCompare(b.created_at));
+        setMessages(rows);
+        setLoading(false);
+        setLiveSynced(true);
+      },
+      (err) => {
+        setLoading(false);
+        setLiveSynced(false);
+        setError('Unable to sync live messages.');
+        try {
+          handleFirestoreError(err, OperationType.GET, 'ride_messages');
+        } catch {
+          // logged
         }
-      })
-      .catch(() => {
-        if (!cancelled) setError('Network error while loading messages.');
-      })
-      .finally(() => {
-        if (!cancelled) setLoading(false);
-      });
-
-    return () => {
-      cancelled = true;
-    };
-  }, [currentRide?.id, accessToken]);
-
-  // Real-time chat updates via WebSocket + Supabase Realtime
-  useEffect(() => {
-    if (!currentRide) return;
-    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const ws = new WebSocket(`${protocol}//${window.location.host}/ws`);
-    ws.onopen = () => {
-      setWsLive(true);
-      ws.send(JSON.stringify({ type: 'subscribe', channel: `ride:${currentRide.id}` }));
-    };
-    ws.onmessage = (ev) => {
-      try {
-        const frame = JSON.parse(ev.data);
-        if (frame.event === 'chat:message' && frame.payload?.id) {
-          setMessages((prev) =>
-            prev.some((m) => m.id === frame.payload.id) ? prev : [...prev, frame.payload]
-          );
-        }
-      } catch {
-        // ignore malformed frames
       }
-    };
-    ws.onclose = () => setWsLive(false);
+    );
 
-    let channel: ReturnType<SupabaseClient['channel']> | null = null;
-    if (supabase) {
-      channel = supabase
-        .channel(`ride-chat-${currentRide.id}`)
-        .on(
-          'postgres_changes',
-          {
-            event: 'INSERT',
-            schema: 'public',
-            table: 'ride_messages',
-            filter: `ride_id=eq.${currentRide.id}`,
-          },
-          (payload) => {
-            const incoming = payload.new as RideMessage;
-            setMessages((prev) =>
-              prev.some((m) => m.id === incoming.id) ? prev : [...prev, incoming]
-            );
-          }
-        )
-        .subscribe();
-    }
-
-    return () => {
-      ws.close();
-      if (supabase && channel) {
-        supabase.removeChannel(channel);
-      }
-    };
-  }, [currentRide?.id, supabase]);
+    return () => unsub();
+  }, [currentRide?.id, customerUid]);
 
   useEffect(() => {
     endRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages.length]);
 
   const sendMessage = async (msgText: string) => {
-    if (!currentRide || !accessToken) {
-      onRequireAuth?.();
-      return;
-    }
+    if (!currentRide) return;
     const trimmed = msgText.trim();
     if (!trimmed || sending) return;
     setSending(true);
     setError(null);
     try {
-      const res = await fetch(`/api/rides/${currentRide.id}/messages`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${accessToken}`,
-        },
-        body: JSON.stringify({ message: trimmed }),
+      await addDoc(collection(db, 'ride_messages'), {
+        ride_id: currentRide.id,
+        customer_uid: customerUid,
+        driver_id: currentRide.driver_id || null,
+        sender_user_id: customerUid,
+        sender_role: 'customer',
+        message: trimmed,
+        created_at: new Date().toISOString(),
       });
-      const data = await res.json();
-      if (!res.ok) {
-        setError(data.error || 'Unable to send message.');
-        return;
-      }
-      if (data.message) {
-        setMessages((prev) =>
-          prev.some((m) => m.id === data.message.id) ? prev : [...prev, data.message]
-        );
-      }
       setText('');
-    } catch {
-      setError('Network error while sending message.');
+    } catch (err) {
+      setError('Unable to send message right now.');
+      try {
+        handleFirestoreError(err, OperationType.CREATE, 'ride_messages');
+      } catch {
+        // logged
+      }
     } finally {
       setSending(false);
     }
@@ -227,14 +172,17 @@ export const DriverChatView: React.FC<DriverChatViewProps> = ({
 
   const handleCopyPhone = async (phoneValue: string) => {
     if (!phoneValue || !navigator.clipboard) return;
-    await navigator.clipboard.writeText(phoneValue);
-    setCopiedPhone(true);
-    setTimeout(() => setCopiedPhone(false), 2000);
+    try {
+      await navigator.clipboard.writeText(phoneValue);
+      setCopiedPhone(true);
+      setTimeout(() => setCopiedPhone(false), 2000);
+    } catch {
+      // Clipboard blocked
+    }
   };
 
   return (
     <div className="flex-1 min-h-0 flex flex-col w-full bg-white overflow-hidden">
-      {/* Top Bar + Phone Segmented Switch */}
       <div className="bg-white border-b border-neutral-200 px-3.5 py-2.5 space-y-2.5 shrink-0">
         <div className="flex items-center gap-2.5 min-w-0">
           <button
@@ -251,20 +199,19 @@ export const DriverChatView: React.FC<DriverChatViewProps> = ({
             </h1>
             <p className="text-[11px] text-[#737373] font-mono-num truncate">
               {currentRide
-                ? `${currentRide.ride_code} · ${wsLive ? 'Live chat connected' : 'Syncing chat'}`
-                : `${driverRides.length} driver trip${driverRides.length === 1 ? '' : 's'} on record`}
+                ? `${currentRide.ride_code} · ${liveSynced ? 'Live Firestore sync' : 'Connecting'}`
+                : `${driverRides.length} trip${driverRides.length === 1 ? '' : 's'} on record`}
             </p>
           </div>
         </div>
 
-        {/* Full-Width Switcher between Live Chat & Driver History */}
         <div className="grid grid-cols-2 gap-1 p-1 bg-[#F7F8FA] border border-neutral-200 rounded-xl">
           <button
             type="button"
             onClick={() => setMobilePanel('chat')}
             className={`min-h-[38px] px-3 rounded-lg text-xs font-semibold cursor-pointer transition ${
               mobilePanel === 'chat'
-                ? 'bg-[#111111] text-[#FFC928]'
+                ? 'bg-[#111111] text-[#F5C518]'
                 : 'text-[#737373]'
             }`}
           >
@@ -275,7 +222,7 @@ export const DriverChatView: React.FC<DriverChatViewProps> = ({
             onClick={() => setMobilePanel('history')}
             className={`min-h-[38px] px-3 rounded-lg text-xs font-semibold cursor-pointer transition ${
               mobilePanel === 'history'
-                ? 'bg-[#111111] text-[#FFC928]'
+                ? 'bg-[#111111] text-[#F5C518]'
                 : 'text-[#737373]'
             }`}
           >
@@ -284,16 +231,13 @@ export const DriverChatView: React.FC<DriverChatViewProps> = ({
         </div>
       </div>
 
-      {/* Main Phone Panel Switch */}
       {mobilePanel === 'history' ? (
         <aside className="flex-1 min-h-0 flex flex-col bg-[#F7F8FA] overflow-hidden">
           <div className="p-3.5 border-b border-neutral-200 bg-white space-y-2.5 shrink-0">
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-2">
                 <History className="w-4 h-4 text-[#111111]" />
-                <h2 className="font-display text-sm font-bold text-[#111111]">
-                  Driver History
-                </h2>
+                <h2 className="font-display text-sm font-bold text-[#111111]">Driver History</h2>
               </div>
               <span className="text-[11px] font-mono-num font-semibold text-[#737373]">
                 {driverRides.length} total
@@ -306,8 +250,8 @@ export const DriverChatView: React.FC<DriverChatViewProps> = ({
                 type="text"
                 value={historyQuery}
                 onChange={(e) => setHistoryQuery(e.target.value)}
-                placeholder="Search driver name, gadi no..."
-                className="w-full h-10 pl-9 pr-3 rounded-xl border border-neutral-200 bg-[#F7F8FA] text-xs text-[#111111] focus:outline-none focus:ring-2 focus:ring-[#FFC928]"
+                placeholder="Search ride code, driver name..."
+                className="w-full h-10 pl-9 pr-3 rounded-xl border border-neutral-200 bg-[#F7F8FA] text-xs text-[#111111] focus:outline-none focus:ring-2 focus:ring-[#F5C518]"
               />
             </div>
           </div>
@@ -316,13 +260,9 @@ export const DriverChatView: React.FC<DriverChatViewProps> = ({
             {filteredDriverRides.length === 0 ? (
               <div className="bg-white rounded-2xl border border-neutral-200 p-5 text-center space-y-2">
                 <Car className="w-7 h-7 text-neutral-300 mx-auto" />
-                <p className="text-xs font-bold text-[#111111]">
-                  {driverRides.length === 0 ? 'No Driver History Yet' : 'No Matching Drivers'}
-                </p>
+                <p className="text-xs font-bold text-[#111111]">No Rides Found</p>
                 <p className="text-[11px] text-[#737373]">
-                  {driverRides.length === 0
-                    ? 'When you book a Bike, Auto, or Cab ride, your captain photo, vehicle number, call option, and chat history stay saved here.'
-                    : 'Try searching by another driver name or vehicle plate number.'}
+                  When you book a Bike, Auto, or Cab ride, your captain details and live chat stay saved here.
                 </p>
               </div>
             ) : (
@@ -332,7 +272,7 @@ export const DriverChatView: React.FC<DriverChatViewProps> = ({
                 const dPhoto = ride.drivers?.users?.avatar_url || null;
                 const dPhone = ride.drivers?.users?.phone || '';
                 const dRating = Number(ride.drivers?.rating_avg || 5).toFixed(1);
-                const plate = ride.vehicles?.registration_number || 'Assigning plate';
+                const plate = ride.vehicles?.registration_number || ride.ride_code;
                 const vModel = ride.vehicles
                   ? `${ride.vehicles.color} ${ride.vehicles.make} ${ride.vehicles.model}`
                   : ride.vehicle_categories?.name || 'Cab';
@@ -342,7 +282,7 @@ export const DriverChatView: React.FC<DriverChatViewProps> = ({
                     key={ride.id}
                     className={`rounded-2xl border p-3 bg-white transition space-y-2.5 ${
                       isSelected
-                        ? 'border-[#111111] ring-2 ring-[#FFC928]/60 shadow-xs'
+                        ? 'border-[#111111] ring-2 ring-[#F5C518]/60'
                         : 'border-neutral-200 hover:border-neutral-300'
                     }`}
                   >
@@ -354,7 +294,7 @@ export const DriverChatView: React.FC<DriverChatViewProps> = ({
                       }}
                       className="w-full text-left flex items-start gap-2.5 cursor-pointer"
                     >
-                      <div className="w-12 h-12 rounded-full bg-[#111111] text-[#FFC928] font-display text-sm font-bold flex items-center justify-center shrink-0 overflow-hidden border border-neutral-200">
+                      <div className="w-12 h-12 rounded-full bg-[#111111] text-[#F5C518] font-display text-sm font-bold flex items-center justify-center shrink-0 overflow-hidden border border-neutral-200">
                         {dPhoto ? (
                           <img
                             src={dPhoto}
@@ -373,7 +313,7 @@ export const DriverChatView: React.FC<DriverChatViewProps> = ({
                             {dName}
                           </p>
                           <span className="inline-flex items-center gap-0.5 text-[11px] font-mono-num font-semibold text-[#111111] shrink-0">
-                            <Star className="w-3 h-3 text-[#FFC928] fill-[#FFC928]" />
+                            <Star className="w-3 h-3 text-[#F5C518] fill-[#F5C518]" />
                             {dRating}
                           </span>
                         </div>
@@ -411,7 +351,7 @@ export const DriverChatView: React.FC<DriverChatViewProps> = ({
                           onSelectRide(ride.id);
                           setMobilePanel('chat');
                         }}
-                        className="flex-1 min-h-[40px] px-2.5 rounded-xl bg-[#FFC928] text-[#111111] text-[11px] font-bold inline-flex items-center justify-center gap-1 hover:brightness-95 cursor-pointer"
+                        className="flex-1 min-h-[40px] px-2.5 rounded-xl bg-[#F5C518] text-[#111111] text-[11px] font-bold inline-flex items-center justify-center gap-1 hover:brightness-95 cursor-pointer"
                       >
                         <MessageSquare className="w-3.5 h-3.5" />
                         <span>Live Chat</span>
@@ -428,7 +368,7 @@ export const DriverChatView: React.FC<DriverChatViewProps> = ({
           {!currentRide ? (
             <div className="flex-1 flex items-center justify-center p-5 overflow-y-auto">
               <div className="w-full bg-[#F7F8FA] border border-neutral-200 rounded-3xl p-5 text-center space-y-4">
-                <div className="w-12 h-12 rounded-2xl bg-[#FFC928] text-[#111111] flex items-center justify-center mx-auto">
+                <div className="w-12 h-12 rounded-2xl bg-[#F5C518] text-[#111111] flex items-center justify-center mx-auto">
                   <Car className="w-6 h-6" />
                 </div>
                 <div className="space-y-1.5">
@@ -436,36 +376,24 @@ export const DriverChatView: React.FC<DriverChatViewProps> = ({
                     Ready for Driver Chat & History
                   </h2>
                   <p className="text-xs text-[#737373] leading-relaxed">
-                    Book a ride or scan Nearby Drivers on Home Map to see your captain’s photo, full name, vehicle number plate, vehicle details, phone call button, and live chat here.
+                    Book a ride on Home Map to chat live with your captain here.
                   </p>
                 </div>
-                <div className="space-y-2">
-                  <button
-                    type="button"
-                    onClick={onBack}
-                    className="w-full min-h-[44px] px-4 rounded-xl bg-[#111111] text-white font-semibold text-xs hover:bg-neutral-800 cursor-pointer"
-                  >
-                    Find Nearby Drivers on Map
-                  </button>
-                  {!accessToken && onRequireAuth && (
-                    <button
-                      type="button"
-                      onClick={onRequireAuth}
-                      className="w-full min-h-[44px] px-4 rounded-xl bg-[#FFC928] text-[#111111] font-bold text-xs hover:brightness-95 cursor-pointer"
-                    >
-                      Login to Sync History
-                    </button>
-                  )}
-                </div>
+                <button
+                  type="button"
+                  onClick={onBack}
+                  className="w-full min-h-[44px] px-4 rounded-xl bg-[#111111] text-white font-semibold text-xs hover:bg-neutral-800 cursor-pointer"
+                >
+                  Open Home Map
+                </button>
               </div>
             </div>
           ) : (
             <>
-              {/* Pinned Compact Driver Identity, Image, Vehicle Plate & Call Row */}
               <div className="p-3 bg-[#F7F8FA] border-b border-neutral-200 space-y-2.5 shrink-0">
                 <div className="flex items-center justify-between gap-2.5">
                   <div className="flex items-center gap-2.5 min-w-0">
-                    <div className="w-12 h-12 rounded-full bg-[#111111] text-[#FFC928] font-display text-base font-bold flex items-center justify-center shrink-0 overflow-hidden border-2 border-white shadow-sm">
+                    <div className="w-12 h-12 rounded-full bg-[#111111] text-[#F5C518] font-display text-base font-bold flex items-center justify-center shrink-0 overflow-hidden border-2 border-white shadow-sm">
                       {driverAvatar ? (
                         <img
                           src={driverAvatar}
@@ -477,7 +405,6 @@ export const DriverChatView: React.FC<DriverChatViewProps> = ({
                         driverName.charAt(0).toUpperCase()
                       )}
                     </div>
-
                     <div className="min-w-0">
                       <div className="flex items-center gap-1.5">
                         <h2 className="font-display font-bold text-sm text-[#111111] truncate">
@@ -485,10 +412,9 @@ export const DriverChatView: React.FC<DriverChatViewProps> = ({
                         </h2>
                         <ShieldCheck className="w-3.5 h-3.5 text-[#16A34A] shrink-0" />
                       </div>
-
                       <div className="flex items-center gap-1.5 text-[11px] text-[#737373]">
                         <span className="inline-flex items-center gap-0.5 font-mono-num font-bold text-[#111111]">
-                          <Star className="w-3 h-3 text-[#FFC928] fill-[#FFC928]" />
+                          <Star className="w-3 h-3 text-[#F5C518] fill-[#F5C518]" />
                           {Number(driver?.rating_avg || 5).toFixed(1)}
                         </span>
                         <span aria-hidden="true">·</span>
@@ -503,15 +429,14 @@ export const DriverChatView: React.FC<DriverChatViewProps> = ({
 
                   {currentRide.ride_otp && (
                     <div className="flex items-center gap-1 bg-[#111111] text-white px-2.5 py-1.5 rounded-xl shrink-0">
-                      <KeyRound className="w-3 h-3 text-[#FFC928]" />
-                      <span className="font-mono-num text-xs font-bold text-[#FFC928]">
+                      <KeyRound className="w-3 h-3 text-[#F5C518]" />
+                      <span className="font-mono-num text-xs font-bold text-[#F5C518]">
                         {currentRide.ride_otp}
                       </span>
                     </div>
                   )}
                 </div>
 
-                {/* Gadi Number Plate + Call/Copy */}
                 <div className="flex items-center justify-between gap-2 bg-white rounded-xl border border-neutral-200 px-3 py-2">
                   <div className="min-w-0">
                     {vehicle ? (
@@ -522,10 +447,10 @@ export const DriverChatView: React.FC<DriverChatViewProps> = ({
                         </span>
                       </div>
                     ) : (
-                      <span className="text-[11px] text-[#737373]">Assigning vehicle</span>
+                      <span className="text-[11px] text-[#737373]">{currentRide.ride_code}</span>
                     )}
                     <p className="font-mono-num text-[11px] text-[#737373] truncate">
-                      {driverPhone || 'Phone once assigned'}
+                      {driverPhone || 'Phone available once assigned'}
                     </p>
                   </div>
 
@@ -567,7 +492,6 @@ export const DriverChatView: React.FC<DriverChatViewProps> = ({
                 </div>
               </div>
 
-              {/* Live Messages Feed */}
               <div className="flex-1 min-h-0 overflow-y-auto overscroll-contain p-3.5 space-y-2.5 bg-white">
                 {loading ? (
                   <div className="space-y-2.5">
@@ -581,7 +505,7 @@ export const DriverChatView: React.FC<DriverChatViewProps> = ({
                       Live Chat with {driverName}
                     </p>
                     <p className="text-xs text-[#737373] max-w-xs mx-auto">
-                      Send a message below or tap a quick reply to coordinate pickup & arrival live.
+                      Send a message below or tap a quick reply to coordinate pickup live.
                     </p>
                   </div>
                 ) : (
@@ -615,7 +539,6 @@ export const DriverChatView: React.FC<DriverChatViewProps> = ({
                 <div ref={endRef} />
               </div>
 
-              {/* Docked Quick Replies & Input */}
               <div className="shrink-0 border-t border-neutral-200 bg-white p-3 space-y-2">
                 <div className="flex items-center gap-1.5 overflow-x-auto no-scrollbar">
                   {QUICK_REPLIES.map((preset) => (
@@ -649,13 +572,13 @@ export const DriverChatView: React.FC<DriverChatViewProps> = ({
                     value={text}
                     onChange={(e) => setText(e.target.value)}
                     placeholder={`Message ${driverName}...`}
-                    className="flex-1 h-11 rounded-xl border border-neutral-300 bg-[#F7F8FA] px-3.5 text-xs text-[#111111] focus:outline-none focus:ring-2 focus:ring-[#FFC928]"
+                    className="flex-1 min-w-0 h-11 rounded-xl border border-neutral-300 bg-[#F7F8FA] px-3.5 text-xs text-[#111111] focus:outline-none focus:ring-2 focus:ring-[#F5C518]"
                   />
                   <button
                     type="submit"
                     disabled={sending || !text.trim()}
                     aria-label="Send message"
-                    className="min-h-[44px] px-4 rounded-xl bg-[#FFC928] text-[#111111] font-semibold text-xs inline-flex items-center gap-1.5 hover:brightness-95 disabled:opacity-50 cursor-pointer shrink-0"
+                    className="min-h-[44px] px-4 rounded-xl bg-[#F5C518] text-[#111111] font-semibold text-xs inline-flex items-center gap-1.5 hover:brightness-95 disabled:opacity-50 cursor-pointer shrink-0"
                   >
                     <Send className="w-4 h-4" />
                     <span>Send</span>

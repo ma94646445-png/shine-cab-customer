@@ -1,0 +1,328 @@
+{
+  "entities": {
+    "User": {
+      "title": "User",
+      "description": "SHINE CAB customer account profile with short readable Customer ID",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string" },
+        "phone": { "type": "string" },
+        "email": { "type": "string" },
+        "full_name": { "type": "string" },
+        "short_id": { "type": "string" },
+        "avatar_url": { "type": "string" },
+        "language_preference": { "type": "string" },
+        "preferred_payment_method": { "type": "string", "enum": ["cash", "upi", "online", "card"] },
+        "notification_push_enabled": { "type": "boolean" },
+        "notification_sms_enabled": { "type": "boolean" },
+        "notification_promo_enabled": { "type": "boolean" },
+        "fcm_token": { "type": "string" },
+        "total_rides": { "type": "number" },
+        "rating_avg": { "type": "number" },
+        "role": { "type": "string", "enum": ["customer", "driver", "admin"] },
+        "created_at": { "type": "string" },
+        "updated_at": { "type": "string" }
+      },
+      "required": ["uid", "phone", "full_name", "short_id", "role"]
+    },
+    "FareConfig": {
+      "title": "FareConfig",
+      "description": "Admin-configured fare rules per vehicle category",
+      "type": "object",
+      "properties": {
+        "vehicleCategory": { "type": "string" },
+        "vehicle_category": { "type": "string" },
+        "slug": { "type": "string", "enum": ["bike", "auto", "cab"] },
+        "name": { "type": "string" },
+        "description": { "type": "string" },
+        "capacity": { "type": "number" },
+        "baseFare": { "type": "number" },
+        "base_fare": { "type": "number" },
+        "perKmRate": { "type": "number" },
+        "per_km_rate": { "type": "number" },
+        "minimumFare": { "type": "number" },
+        "minimum_fare": { "type": "number" },
+        "surgeMultiplier": { "type": "number" },
+        "surge_multiplier": { "type": "number" },
+        "active": { "type": "boolean" }
+      }
+    },
+    "Driver": {
+      "title": "Driver",
+      "description": "Live verified captain state and location",
+      "type": "object",
+      "properties": {
+        "name": { "type": "string" },
+        "phone": { "type": "string" },
+        "avatar_url": { "type": "string" },
+        "rating_avg": { "type": "number" },
+        "vehicle_category": { "type": "string" },
+        "slug": { "type": "string" },
+        "current_lat": { "type": "number" },
+        "current_lng": { "type": "number" },
+        "current_heading": { "type": "number" },
+        "is_online": { "type": "boolean" }
+      }
+    },
+    "Ride": {
+      "title": "Ride",
+      "description": "Live ride booking record synced in real time",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "ride_code": { "type": "string" },
+        "customer_id": { "type": "string" },
+        "customer_uid": { "type": "string" },
+        "customer_name": { "type": "string" },
+        "customer_phone": { "type": "string" },
+        "customer_short_id": { "type": "string" },
+        "driver_id": { "type": "string" },
+        "category_id": { "type": "string" },
+        "vehicle_slug": { "type": "string" },
+        "status": { "type": "string" },
+        "pickup_address": { "type": "string" },
+        "pickup_lat": { "type": "number" },
+        "pickup_lng": { "type": "number" },
+        "drop_address": { "type": "string" },
+        "drop_lat": { "type": "number" },
+        "drop_lng": { "type": "number" },
+        "distance_meters": { "type": "number" },
+        "duration_seconds": { "type": "number" },
+        "total_fare": { "type": "number" },
+        "payment_method": { "type": "string" },
+        "payment_status": { "type": "string" },
+        "ride_otp": { "type": "string" },
+        "share_token": { "type": "string" },
+        "created_at": { "type": "string" }
+      },
+      "required": ["ride_code", "customer_uid", "status", "pickup_address", "drop_address", "total_fare", "ride_otp"]
+    },
+    "RideMessage": {
+      "title": "RideMessage",
+      "description": "Real-time chat messages for a ride",
+      "type": "object",
+      "properties": {
+        "ride_id": { "type": "string" },
+        "customer_uid": { "type": "string" },
+        "sender_user_id": { "type": "string" },
+        "sender_role": { "type": "string", "enum": ["customer", "driver"] },
+        "message": { "type": "string" },
+        "created_at": { "type": "string" }
+      },
+      "required": ["ride_id", "customer_uid", "sender_user_id", "sender_role", "message", "created_at"]
+    },
+    "LiveNotification": {
+      "title": "LiveNotification",
+      "description": "Admin broadcast announcements and deep links",
+      "type": "object",
+      "properties": {
+        "title": { "type": "string" },
+        "message": { "type": "string" },
+        "targetAudience": { "type": "string", "enum": ["all", "customers", "drivers"] },
+        "active": { "type": "boolean" },
+        "actionLink": { "type": "string" },
+        "created_at": { "type": "string" }
+      }
+    },
+    "SavedAddress": {
+      "title": "SavedAddress",
+      "description": "Customer saved Home/Office/Other locations",
+      "type": "object",
+      "properties": {
+        "customer_uid": { "type": "string" },
+        "label": { "type": "string" },
+        "address_type": { "type": "string", "enum": ["home", "office", "other"] },
+        "address_line": { "type": "string" },
+        "lat": { "type": "number" },
+        "lng": { "type": "number" }
+      },
+      "required": ["customer_uid", "label", "address_type", "address_line", "lat", "lng"]
+    },
+    "EmergencyContact": {
+      "title": "EmergencyContact",
+      "description": "Customer trusted SOS contacts",
+      "type": "object",
+      "properties": {
+        "customer_uid": { "type": "string" },
+        "name": { "type": "string" },
+        "phone": { "type": "string" },
+        "relationship": { "type": "string" },
+        "is_primary": { "type": "boolean" }
+      },
+      "required": ["customer_uid", "name", "phone", "is_primary"]
+    },
+    "Coupon": {
+      "title": "Coupon",
+      "description": "Promotional discount coupons managed by admin",
+      "type": "object",
+      "properties": {
+        "code": { "type": "string" },
+        "title": { "type": "string" },
+        "description": { "type": "string" },
+        "discount_type": { "type": "string", "enum": ["percentage", "flat"] },
+        "discount_value": { "type": "number" },
+        "min_ride_amount": { "type": "number" },
+        "max_discount": { "type": "number" },
+        "first_ride_only": { "type": "boolean" },
+        "applicable_category_slug": { "type": "string" },
+        "is_active": { "type": "boolean" },
+        "expires_at": { "type": "string" }
+      }
+    },
+    "SupportTicket": {
+      "title": "SupportTicket",
+      "description": "Customer help and refund tickets",
+      "type": "object",
+      "properties": {
+        "ticket_number": { "type": "string" },
+        "customer_uid": { "type": "string" },
+        "ride_id": { "type": "string" },
+        "category": { "type": "string" },
+        "subject": { "type": "string" },
+        "description": { "type": "string" },
+        "priority": { "type": "string" },
+        "status": { "type": "string" },
+        "created_at": { "type": "string" }
+      },
+      "required": ["ticket_number", "customer_uid", "category", "subject", "description", "status", "created_at"]
+    },
+    "SupportMessage": {
+      "title": "SupportMessage",
+      "description": "Conversation messages on a support ticket",
+      "type": "object",
+      "properties": {
+        "ticket_id": { "type": "string" },
+        "customer_uid": { "type": "string" },
+        "sender_id": { "type": "string" },
+        "sender_role": { "type": "string", "enum": ["customer", "admin"] },
+        "message": { "type": "string" },
+        "created_at": { "type": "string" }
+      },
+      "required": ["ticket_id", "customer_uid", "sender_id", "sender_role", "message", "created_at"]
+    },
+    "SosAlert": {
+      "title": "SosAlert",
+      "description": "Emergency SOS trigger alert with GPS coordinates",
+      "type": "object",
+      "properties": {
+        "customer_uid": { "type": "string" },
+        "ride_id": { "type": "string" },
+        "lat": { "type": "number" },
+        "lng": { "type": "number" },
+        "message": { "type": "string" },
+        "status": { "type": "string" },
+        "dispatched_to": { "type": "array" },
+        "created_at": { "type": "string" }
+      },
+      "required": ["customer_uid", "status", "created_at"]
+    },
+    "Payment": {
+      "title": "Payment",
+      "description": "Ride payment receipts and refund requests",
+      "type": "object",
+      "properties": {
+        "customer_uid": { "type": "string" },
+        "ride_id": { "type": "string" },
+        "amount": { "type": "number" },
+        "currency": { "type": "string" },
+        "payment_method": { "type": "string" },
+        "provider": { "type": "string" },
+        "status": { "type": "string" },
+        "receipt_number": { "type": "string" },
+        "refund_reason": { "type": "string" },
+        "created_at": { "type": "string" }
+      },
+      "required": ["customer_uid", "ride_id", "amount", "status", "created_at"]
+    },
+    "ScheduledRide": {
+      "title": "ScheduledRide",
+      "description": "Scheduled future ride requests",
+      "type": "object",
+      "properties": {
+        "customer_uid": { "type": "string" },
+        "category_id": { "type": "string" },
+        "pickup_address": { "type": "string" },
+        "pickup_lat": { "type": "number" },
+        "pickup_lng": { "type": "number" },
+        "drop_address": { "type": "string" },
+        "drop_lat": { "type": "number" },
+        "drop_lng": { "type": "number" },
+        "scheduled_for": { "type": "string" },
+        "estimated_fare": { "type": "number" },
+        "status": { "type": "string" },
+        "created_at": { "type": "string" }
+      },
+      "required": ["customer_uid", "pickup_address", "drop_address", "scheduled_for", "status", "created_at"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": { "$ref": "#/entities/User" },
+      "description": "Customer profile records with full_name, phone, short_id"
+    },
+    "/fare_configs/{configId}": {
+      "schema": { "$ref": "#/entities/FareConfig" },
+      "description": "Admin-managed live fare configurations per vehicle category"
+    },
+    "/drivers/{driverId}": {
+      "schema": { "$ref": "#/entities/Driver" },
+      "description": "Online verified drivers with GPS position"
+    },
+    "/rides/{rideId}": {
+      "schema": { "$ref": "#/entities/Ride" },
+      "description": "Ride bookings and live status tracking"
+    },
+    "/ride_messages/{messageId}": {
+      "schema": { "$ref": "#/entities/RideMessage" },
+      "description": "Real-time customer-driver messages"
+    },
+    "/live_notifications/{notificationId}": {
+      "schema": { "$ref": "#/entities/LiveNotification" },
+      "description": "Admin broadcast live alerts for customers"
+    },
+    "/user_notifications/{notificationId}": {
+      "schema": { "type": "object" },
+      "description": "Customer personal ride and read-state notifications"
+    },
+    "/saved_addresses/{addressId}": {
+      "schema": { "$ref": "#/entities/SavedAddress" },
+      "description": "Customer saved addresses"
+    },
+    "/emergency_contacts/{contactId}": {
+      "schema": { "$ref": "#/entities/EmergencyContact" },
+      "description": "Customer trusted SOS contacts"
+    },
+    "/coupons/{couponId}": {
+      "schema": { "$ref": "#/entities/Coupon" },
+      "description": "Active promotional coupons"
+    },
+    "/coupon_usage/{usageId}": {
+      "schema": { "type": "object" },
+      "description": "Coupon redemption records"
+    },
+    "/payments/{paymentId}": {
+      "schema": { "$ref": "#/entities/Payment" },
+      "description": "Customer payment records & refund requests"
+    },
+    "/support_tickets/{ticketId}": {
+      "schema": { "$ref": "#/entities/SupportTicket" },
+      "description": "Customer support tickets"
+    },
+    "/support_messages/{messageId}": {
+      "schema": { "$ref": "#/entities/SupportMessage" },
+      "description": "Support ticket conversation messages"
+    },
+    "/sos_alerts/{alertId}": {
+      "schema": { "$ref": "#/entities/SosAlert" },
+      "description": "Customer emergency SOS alerts"
+    },
+    "/scheduled_rides/{scheduleId}": {
+      "schema": { "$ref": "#/entities/ScheduledRide" },
+      "description": "Scheduled rides"
+    },
+    "/shared_trips/{shareToken}": {
+      "schema": { "type": "object" },
+      "description": "Public safe trip tracking snapshot keyed by random share_token"
+    }
+  }
+}

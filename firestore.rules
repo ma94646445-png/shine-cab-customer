@@ -1,0 +1,228 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isAdmin() {
+      return isSignedIn() && (
+        exists(/databases/$(database)/documents/admins/$(request.auth.uid)) ||
+        (request.auth.token.email == 'bujnessshine@gmail.com' && request.auth.token.email_verified == true)
+      );
+    }
+
+    function isOwner(uid) {
+      return isSignedIn() && request.auth.uid == uid;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && !id.matches('.*[/\\.].*');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    // Connection test document (non-PII health probe)
+    match /test/connection {
+      allow read: if true;
+      allow write: if false;
+    }
+
+    // Admin registry
+    match /admins/{uid} {
+      allow read: if isOwner(uid) || isAdmin();
+      allow write: if isAdmin();
+    }
+
+    // Customer profiles (/users/{userId})
+    match /users/{userId} {
+      allow read: if isOwner(userId) || isAdmin();
+      allow create: if isOwner(userId)
+        && incoming().uid == userId
+        && incoming().role == 'customer'
+        && incoming().full_name is string && incoming().full_name.size() >= 1 && incoming().full_name.size() <= 120
+        && incoming().phone is string && incoming().phone.size() >= 8 && incoming().phone.size() <= 24
+        && incoming().short_id is string && incoming().short_id.size() >= 4 && incoming().short_id.size() <= 20;
+      allow update: if isAdmin() || (
+        isOwner(userId)
+        && incoming().uid == existing().uid
+        && incoming().role == existing().role
+        && (!('short_id' in incoming()) || incoming().short_id is string)
+      );
+      allow delete: if isOwner(userId) || isAdmin();
+    }
+
+    // Public/signed-in fare configs managed by Admin
+    match /fare_configs/{configId} {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+
+    // Drivers (location & vehicle summary for ride matching; full PII protected in private subcollection if any)
+    match /drivers/{driverId} {
+      allow read: if isSignedIn();
+      allow write: if isAdmin() || (isSignedIn() && driverId == request.auth.uid);
+    }
+
+    // Live notifications broadcast by Admin
+    match /live_notifications/{notifId} {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+
+    // Per-user notification log
+    match /user_notifications/{notifId} {
+      allow read: if isSignedIn() && (existing().user_id == request.auth.uid || isAdmin());
+      allow create: if isSignedIn() && incoming().user_id == request.auth.uid;
+      allow update: if isSignedIn() && (existing().user_id == request.auth.uid || isAdmin())
+        && incoming().user_id == existing().user_id;
+      allow delete: if isOwner(existing().user_id) || isAdmin();
+    }
+
+    // Coupons & Usage
+    match /coupons/{couponId} {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+
+    match /coupon_usage/{usageId} {
+      allow read: if isSignedIn() && (existing().customer_uid == request.auth.uid || isAdmin());
+      allow create: if isSignedIn() && incoming().customer_uid == request.auth.uid;
+      allow update, delete: if isAdmin();
+    }
+
+    // Rides
+    match /rides/{rideId} {
+      allow read: if isSignedIn() && (
+        existing().customer_uid == request.auth.uid ||
+        existing().driver_id == request.auth.uid ||
+        isAdmin()
+      );
+      allow create: if isSignedIn()
+        && isValidId(rideId)
+        && incoming().customer_uid == request.auth.uid
+        && incoming().ride_code is string && incoming().ride_code.size() <= 40
+        && incoming().pickup_address is string && incoming().pickup_address.size() <= 500
+        && incoming().drop_address is string && incoming().drop_address.size() <= 500
+        && incoming().total_fare is number && incoming().total_fare >= 0 && incoming().total_fare <= 500000
+        && incoming().ride_otp is string && incoming().ride_otp.size() == 4
+        && incoming().status in ['searching', 'searching_driver'];
+      allow update: if isAdmin() || (
+        isSignedIn() && existing().driver_id == request.auth.uid
+      ) || (
+        isSignedIn()
+        && existing().customer_uid == request.auth.uid
+        && incoming().customer_uid == existing().customer_uid
+      );
+      allow delete: if isAdmin();
+    }
+
+    // Shared trip tracking snapshot (keyed by unguessable share token, non-PII)
+    match /shared_trips/{shareToken} {
+      allow read: if true;
+      allow create, update: if isSignedIn() && incoming().customer_uid == request.auth.uid;
+      allow delete: if isSignedIn() && (existing().customer_uid == request.auth.uid || isAdmin());
+    }
+
+    // Ride chat messages
+    match /ride_messages/{messageId} {
+      allow read: if isSignedIn() && (
+        existing().customer_uid == request.auth.uid ||
+        existing().driver_id == request.auth.uid ||
+        isAdmin()
+      );
+      allow create: if isSignedIn()
+        && incoming().sender_user_id == request.auth.uid
+        && incoming().customer_uid is string
+        && incoming().ride_id is string
+        && incoming().sender_role in ['customer', 'driver']
+        && incoming().message is string && incoming().message.size() >= 1 && incoming().message.size() <= 1500;
+      allow update, delete: if isAdmin();
+    }
+
+    // Saved Addresses
+    match /saved_addresses/{addressId} {
+      allow read: if isSignedIn() && (existing().customer_uid == request.auth.uid || isAdmin());
+      allow create: if isSignedIn()
+        && incoming().customer_uid == request.auth.uid
+        && incoming().address_line is string && incoming().address_line.size() <= 500
+        && incoming().lat is number && incoming().lng is number;
+      allow update: if isSignedIn() && existing().customer_uid == request.auth.uid && incoming().customer_uid == existing().customer_uid;
+      allow delete: if isSignedIn() && (existing().customer_uid == request.auth.uid || isAdmin());
+    }
+
+    // Emergency Contacts
+    match /emergency_contacts/{contactId} {
+      allow read: if isSignedIn() && (existing().customer_uid == request.auth.uid || isAdmin());
+      allow create: if isSignedIn()
+        && incoming().customer_uid == request.auth.uid
+        && incoming().name is string && incoming().name.size() >= 1 && incoming().name.size() <= 120
+        && incoming().phone is string && incoming().phone.size() >= 5 && incoming().phone.size() <= 24;
+      allow update: if isSignedIn() && existing().customer_uid == request.auth.uid && incoming().customer_uid == existing().customer_uid;
+      allow delete: if isSignedIn() && (existing().customer_uid == request.auth.uid || isAdmin());
+    }
+
+    // Payments & Refund Requests
+    match /payments/{paymentId} {
+      allow read: if isSignedIn() && (existing().customer_uid == request.auth.uid || isAdmin());
+      allow create: if isSignedIn()
+        && incoming().customer_uid == request.auth.uid
+        && incoming().amount is number && incoming().amount >= 0;
+      allow update: if isAdmin() || (
+        isSignedIn() && existing().customer_uid == request.auth.uid && incoming().customer_uid == existing().customer_uid
+      );
+      allow delete: if isAdmin();
+    }
+
+    // Support Tickets & Messages
+    match /support_tickets/{ticketId} {
+      allow read: if isSignedIn() && (existing().customer_uid == request.auth.uid || isAdmin());
+      allow create: if isSignedIn()
+        && incoming().customer_uid == request.auth.uid
+        && incoming().subject is string && incoming().subject.size() >= 1 && incoming().subject.size() <= 200
+        && incoming().description is string && incoming().description.size() >= 1 && incoming().description.size() <= 3000;
+      allow update: if isAdmin() || (
+        isSignedIn() && existing().customer_uid == request.auth.uid && incoming().customer_uid == existing().customer_uid
+      );
+      allow delete: if isAdmin();
+    }
+
+    match /support_messages/{messageId} {
+      allow read: if isSignedIn() && (existing().customer_uid == request.auth.uid || isAdmin());
+      allow create: if isSignedIn()
+        && incoming().customer_uid == request.auth.uid
+        && incoming().sender_id == request.auth.uid
+        && incoming().message is string && incoming().message.size() >= 1 && incoming().message.size() <= 2000;
+      allow update, delete: if isAdmin();
+    }
+
+    // SOS Alerts
+    match /sos_alerts/{alertId} {
+      allow read: if isSignedIn() && (existing().customer_uid == request.auth.uid || isAdmin());
+      allow create: if isSignedIn() && incoming().customer_uid == request.auth.uid;
+      allow update, delete: if isAdmin();
+    }
+
+    // Scheduled Rides
+    match /scheduled_rides/{scheduleId} {
+      allow read: if isSignedIn() && (existing().customer_uid == request.auth.uid || isAdmin());
+      allow create: if isSignedIn() && incoming().customer_uid == request.auth.uid;
+      allow update: if isAdmin() || (
+        isSignedIn() && existing().customer_uid == request.auth.uid && incoming().customer_uid == existing().customer_uid
+      );
+      allow delete: if isSignedIn() && (existing().customer_uid == request.auth.uid || isAdmin());
+    }
+
+    // Default-deny catch-all
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

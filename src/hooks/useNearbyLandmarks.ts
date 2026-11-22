@@ -1,98 +1,74 @@
 import { useEffect, useState } from 'react';
-import { useMapsLibrary } from '@vis.gl/react-google-maps';
-import { LocationPoint } from '../types/shinecab';
+import { searchNominatim } from '../lib/osm';
 
-export interface NearbyLandmark extends LocationPoint {
+export interface NearbyLandmark {
   id: string;
   name: string;
+  address: string;
+  lat: number;
+  lng: number;
+  placeId?: string;
   categoryLabel: string;
 }
-
-const TYPE_LABELS: Record<string, string> = {
-  train_station: 'Railway Station',
-  subway_station: 'Metro Station',
-  bus_station: 'Bus Terminal',
-  airport: 'Airport',
-  shopping_mall: 'Shopping Mall',
-  hospital: 'Hospital',
-};
 
 export function useNearbyLandmarks(
   center: { lat: number; lng: number } | null,
   enabled: boolean
 ) {
-  const placesLib = useMapsLibrary('places');
   const [landmarks, setLandmarks] = useState<NearbyLandmark[]>([]);
   const [loading, setLoading] = useState(false);
 
   useEffect(() => {
-    if (!enabled || !placesLib || !center) {
-      return;
-    }
-
-    const PlaceClass = placesLib.Place as typeof google.maps.places.Place | undefined;
-    if (!PlaceClass || typeof PlaceClass.searchNearby !== 'function') {
+    if (!enabled || !center) {
+      setLandmarks([]);
+      setLoading(false);
       return;
     }
 
     let cancelled = false;
     setLoading(true);
 
-    PlaceClass.searchNearby({
-      fields: ['id', 'displayName', 'formattedAddress', 'location', 'primaryType'],
-      locationRestriction: {
-        center: { lat: center.lat, lng: center.lng },
-        radius: 5000,
-      },
-      includedPrimaryTypes: [
-        'train_station',
-        'subway_station',
-        'bus_station',
-        'airport',
-        'shopping_mall',
-        'hospital',
-      ],
-      maxResultCount: 5,
-      rankPreference: 'POPULARITY',
-    })
-      .then((res) => {
+    const run = async () => {
+      try {
+        const [busStops, stations] = await Promise.all([
+          searchNominatim('bus stand', 'in', center).catch(() => []),
+          searchNominatim('railway station', 'in', center).catch(() => []),
+        ]);
         if (cancelled) return;
-        const list: NearbyLandmark[] = [];
-        for (const p of res.places || []) {
-          if (!p.location || !p.displayName) continue;
-          const primaryType = p.primaryType || '';
-          list.push({
-            id: p.id || `${p.location.lat()}-${p.location.lng()}`,
-            name: p.displayName,
-            address: p.formattedAddress || p.displayName,
-            lat: p.location.lat(),
-            lng: p.location.lng(),
-            placeId: p.id,
-            categoryLabel: TYPE_LABELS[primaryType] || 'Nearby Place',
-          });
-        }
-        setLandmarks(list);
-      })
-      .catch((err: unknown) => {
-        if (cancelled) return;
-        const msg = err instanceof Error ? err.message : String(err);
-        if (
-          msg.includes('OVER_QUERY_LIMIT') ||
-          msg.includes('429') ||
-          msg.includes('RESOURCE_EXHAUSTED')
-        ) {
-          window.dispatchEvent(new CustomEvent('gmp-quota-exceeded'));
-        }
-        setLandmarks([]);
-      })
-      .finally(() => {
+        const combined: NearbyLandmark[] = [
+          ...busStops.slice(0, 2).map((s) => ({
+            id: `bus-${s.placeId}`,
+            name: s.mainText,
+            address: s.address,
+            lat: s.lat,
+            lng: s.lng,
+            placeId: s.placeId,
+            categoryLabel: 'Bus Stand',
+          })),
+          ...stations.slice(0, 2).map((s) => ({
+            id: `rail-${s.placeId}`,
+            name: s.mainText,
+            address: s.address,
+            lat: s.lat,
+            lng: s.lng,
+            placeId: s.placeId,
+            categoryLabel: 'Station',
+          })),
+        ];
+        setLandmarks(combined);
+      } catch {
+        if (!cancelled) setLandmarks([]);
+      } finally {
         if (!cancelled) setLoading(false);
-      });
+      }
+    };
+
+    void run();
 
     return () => {
       cancelled = true;
     };
-  }, [placesLib, center?.lat, center?.lng, enabled]);
+  }, [center?.lat, center?.lng, enabled]);
 
   return { landmarks, loading };
 }

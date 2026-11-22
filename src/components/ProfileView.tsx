@@ -26,8 +26,27 @@ import {
   CalendarClock,
   Sparkles,
   RotateCcw,
+  History,
+  ChevronDown,
+  ChevronUp,
 } from 'lucide-react';
-import { SupabaseClient } from '@supabase/supabase-js';
+import { signOut } from 'firebase/auth';
+import {
+  addDoc,
+  collection,
+  deleteDoc,
+  doc,
+  setDoc,
+  updateDoc,
+} from 'firebase/firestore';
+import {
+  auth,
+  db,
+  generateShortCustomerId,
+  handleFirestoreError,
+  OperationType,
+} from '../lib/firebase';
+import { searchNominatim } from '../lib/osm';
 import {
   AppConfig,
   Coupon,
@@ -50,6 +69,7 @@ import { ProfileLegalSection } from './ProfileLegalSection';
 export type ProfileSection =
   | 'overview'
   | 'personal'
+  | 'trips'
   | 'payments'
   | 'addresses'
   | 'safety'
@@ -60,8 +80,7 @@ export type ProfileSection =
 
 interface ProfileViewProps {
   config: AppConfig;
-  supabase: SupabaseClient | null;
-  accessToken: string;
+  customerUid: string;
   userProfile: UserProfile | null;
   customerProfile: CustomerProfile | null;
   rides: RideRecord[];
@@ -85,8 +104,7 @@ interface ProfileViewProps {
 
 export const ProfileView: React.FC<ProfileViewProps> = ({
   config,
-  supabase,
-  accessToken,
+  customerUid,
   userProfile,
   customerProfile,
   rides,
@@ -108,6 +126,9 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
   onReplayOnboarding,
 }) => {
   const [section, setSection] = useState<ProfileSection>('overview');
+  const [rideHistoryDropdownOpen, setRideHistoryDropdownOpen] = useState(false);
+  const [tripFilter, setTripFilter] = useState<'all' | 'completed' | 'active' | 'cancelled' | 'scheduled'>('all');
+  const [expandedTripId, setExpandedTripId] = useState<string | null>(null);
 
   // Personal Profile State
   const [fullName, setFullName] = useState(userProfile?.full_name || '');
@@ -157,9 +178,11 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
     setPromoEnabled(customerProfile.notification_promo_enabled ?? true);
   }, [customerProfile]);
 
-  // Derived strictly from real records
   const totalCompletedRides = useMemo(
-    () => rides.filter((r) => r.status === 'payment_completed' || r.status === 'ride_completed').length,
+    () =>
+      rides.filter((r) =>
+        ['completed', 'ride_completed', 'payment_completed'].includes(r.status)
+      ).length,
     [rides]
   );
 
@@ -188,6 +211,14 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
     () => scheduledRides.filter((s) => s.status === 'scheduled' || s.status === 'dispatching').length,
     [scheduledRides]
   );
+
+  const displayShortId = useMemo(() => {
+    if (userProfile?.short_id) return userProfile.short_id;
+    return generateShortCustomerId(
+      userProfile?.phone || '',
+      userProfile?.full_name || fullName
+    );
+  }, [userProfile?.short_id, userProfile?.phone, userProfile?.full_name, fullName]);
 
   const showNotice = (text: string, type: 'ok' | 'err' = 'ok') => {
     setStatusMsg({ type, text });
@@ -224,63 +255,63 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
 
   const handleSaveProfile = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!supabase || !userProfile || !customerProfile) {
-      showNotice('Database session is required to update your profile.', 'err');
+    if (!customerUid) {
+      showNotice('Signed-in Firebase session required.', 'err');
       return;
     }
     setSaving(true);
     setStatusMsg(null);
+    const cleanedName = fullName.trim() || userProfile?.full_name || 'SHINE CAB Rider';
+    const nextShortId =
+      userProfile?.short_id ||
+      generateShortCustomerId(userProfile?.phone || '', cleanedName);
+
     try {
-      const { error: uErr } = await supabase
-        .from('users')
-        .update({
-          full_name: fullName.trim() || null,
+      await setDoc(
+        doc(db, 'users', customerUid),
+        {
+          uid: customerUid,
+          role: 'customer',
+          phone: userProfile?.phone || auth.currentUser?.phoneNumber || '+910000000000',
+          full_name: cleanedName,
+          short_id: nextShortId,
           email: email.trim() || null,
           avatar_url: avatarUrl.trim() || null,
           language_preference: language,
-          updated_at: new Date().toISOString(),
-        })
-        .eq('id', userProfile.id);
-
-      if (uErr) throw uErr;
-
-      const { error: cErr } = await supabase
-        .from('customers')
-        .update({
           preferred_payment_method: preferredMethod,
           notification_push_enabled: pushEnabled,
           notification_sms_enabled: smsEnabled,
           notification_promo_enabled: promoEnabled,
           updated_at: new Date().toISOString(),
-        })
-        .eq('id', customerProfile.id);
-
-      if (cErr) throw cErr;
+        },
+        { merge: true }
+      );
 
       showNotice('Profile and preferences saved.');
       onRefresh();
     } catch (err: any) {
       showNotice(err?.message || 'Unable to save profile updates.', 'err');
+      try {
+        handleFirestoreError(err, OperationType.WRITE, `users/${customerUid}`);
+      } catch {
+        // logged
+      }
     } finally {
       setSaving(false);
     }
   };
 
   const handleUpdateNotificationPrefs = async () => {
-    if (!supabase || !customerProfile) return;
+    if (!customerUid) return;
     setSaving(true);
     setStatusMsg(null);
     try {
-      const { error } = await supabase
-        .from('customers')
-        .update({
-          notification_push_enabled: pushEnabled,
-          notification_sms_enabled: smsEnabled,
-          notification_promo_enabled: promoEnabled,
-          updated_at: new Date().toISOString(),
-        })
-        .eq('id', customerProfile.id);
-      if (error) throw error;
+      await updateDoc(doc(db, 'users', customerUid), {
+        notification_push_enabled: pushEnabled,
+        notification_sms_enabled: smsEnabled,
+        notification_promo_enabled: promoEnabled,
+        updated_at: new Date().toISOString(),
+      });
       showNotice('Notification preferences updated.');
       onRefresh();
     } catch (err: any) {
@@ -292,156 +323,153 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
 
   const handleUpdatePreferredPayment = async (method: PaymentMethod) => {
     setPreferredMethod(method);
-    if (!supabase || !customerProfile) return;
-    const { error } = await supabase
-      .from('customers')
-      .update({
+    if (!customerUid) return;
+    try {
+      await updateDoc(doc(db, 'users', customerUid), {
         preferred_payment_method: method,
         updated_at: new Date().toISOString(),
-      })
-      .eq('id', customerProfile.id);
-    if (error) {
-      showNotice(error.message, 'err');
-    } else {
+      });
       showNotice(`Default payment method set to ${method.toUpperCase()}.`);
       onRefresh();
+    } catch (err: any) {
+      showNotice(err?.message || 'Could not update default payment method.', 'err');
     }
   };
 
   const handleEnableFcm = async () => {
-    if (!supabase || !customerProfile) return;
+    if (!customerUid) return;
     const token = await registerFcmPushNotifications(config, () => {
       onRefresh();
     });
     if (!token) {
       showNotice(
-        'Push notifications require Firebase Cloud Messaging configuration and browser permission.',
-        'err'
+        'In-app Firestore real-time alerts are already active on this device.',
+        'ok'
       );
       return;
     }
-    await supabase.from('customers').update({ fcm_token: token }).eq('id', customerProfile.id);
-    showNotice('Push notifications enabled on this device.');
-    onRefresh();
+    try {
+      await updateDoc(doc(db, 'users', customerUid), { fcm_token: token });
+      showNotice('Device push token registered.');
+      onRefresh();
+    } catch {
+      showNotice('Unable to save device token.', 'err');
+    }
   };
 
   const handleAddAddress = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!supabase || !customerProfile || !addrLine.trim()) return;
+    if (!customerUid || !addrLine.trim()) return;
     setSavingAddr(true);
     setStatusMsg(null);
-    let lat = 0;
-    let lng = 0;
     try {
-      const geoRes = await fetch(`/api/maps/geocode?address=${encodeURIComponent(addrLine.trim())}`);
-      if (geoRes.ok) {
-        const geo = await geoRes.json();
-        const loc = geo.results?.[0]?.geometry?.location;
-        if (loc) {
-          lat = loc.lat;
-          lng = loc.lng;
-        }
+      const results = await searchNominatim(addrLine.trim(), 'in');
+      const first = results[0];
+      if (!first || (!first.lat && !first.lng)) {
+        showNotice(
+          'Could not find coordinates for that address. Try including town, landmark, or city.',
+          'err'
+        );
+        return;
       }
-    } catch {
-      // handled below
-    }
 
-    if (!lat && !lng) {
+      await addDoc(collection(db, 'saved_addresses'), {
+        customer_uid: customerUid,
+        label:
+          addrLabel.trim() ||
+          (addrType === 'home' ? 'Home' : addrType === 'office' ? 'Office' : 'Saved'),
+        address_type: addrType,
+        address_line: addrLine.trim(),
+        place_id: first.placeId || null,
+        lat: first.lat,
+        lng: first.lng,
+        created_at: new Date().toISOString(),
+      });
+
+      setAddrLabel('');
+      setAddrLine('');
+      showNotice('Address verified via OpenStreetMap and saved.');
+      onRefresh();
+    } catch (err: any) {
+      showNotice(err?.message || 'Unable to save address.', 'err');
+    } finally {
       setSavingAddr(false);
-      showNotice(
-        'Could not verify coordinates for that address. Ensure Google Maps Geocoding is available.',
-        'err'
-      );
-      return;
     }
-
-    const { error } = await supabase.from('saved_addresses').insert({
-      customer_id: customerProfile.id,
-      label:
-        addrLabel.trim() || (addrType === 'home' ? 'Home' : addrType === 'office' ? 'Office' : 'Saved'),
-      address_type: addrType,
-      address_line: addrLine.trim(),
-      lat,
-      lng,
-    });
-
-    setSavingAddr(false);
-    if (error) {
-      showNotice(error.message, 'err');
-      return;
-    }
-    setAddrLabel('');
-    setAddrLine('');
-    showNotice('Address verified and saved.');
-    onRefresh();
   };
 
   const handleDeleteAddress = async (id: string) => {
-    if (!supabase) return;
-    await supabase.from('saved_addresses').delete().eq('id', id);
-    showNotice('Saved address removed.');
-    onRefresh();
+    try {
+      await deleteDoc(doc(db, 'saved_addresses', id));
+      showNotice('Saved address removed.');
+      onRefresh();
+    } catch (err: any) {
+      showNotice(err?.message || 'Could not remove saved address.', 'err');
+    }
   };
 
   const handleAddContact = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!supabase || !customerProfile || !contactName.trim() || !contactPhone.trim()) return;
+    if (!customerUid || !contactName.trim() || !contactPhone.trim()) return;
     setSavingContact(true);
-    const { error } = await supabase.from('emergency_contacts').insert({
-      customer_id: customerProfile.id,
-      name: contactName.trim(),
-      phone: contactPhone.trim(),
-      relationship: contactRel.trim() || null,
-      is_primary: emergencyContacts.length === 0,
-    });
-    setSavingContact(false);
-    if (error) {
-      showNotice(error.message, 'err');
-      return;
+    try {
+      await addDoc(collection(db, 'emergency_contacts'), {
+        customer_uid: customerUid,
+        name: contactName.trim(),
+        phone: contactPhone.trim(),
+        relationship: contactRel.trim() || null,
+        is_primary: emergencyContacts.length === 0,
+        created_at: new Date().toISOString(),
+      });
+      setContactName('');
+      setContactPhone('');
+      setContactRel('');
+      showNotice('Emergency contact added.');
+      onRefresh();
+    } catch (err: any) {
+      showNotice(err?.message || 'Could not add emergency contact.', 'err');
+    } finally {
+      setSavingContact(false);
     }
-    setContactName('');
-    setContactPhone('');
-    setContactRel('');
-    showNotice('Emergency contact added.');
-    onRefresh();
   };
 
   const handleSetPrimaryContact = async (contactId: string) => {
-    if (!supabase || !customerProfile) return;
-    await supabase
-      .from('emergency_contacts')
-      .update({ is_primary: false })
-      .eq('customer_id', customerProfile.id);
-    await supabase
-      .from('emergency_contacts')
-      .update({ is_primary: true })
-      .eq('id', contactId);
-    showNotice('Primary emergency contact updated.');
-    onRefresh();
+    try {
+      await Promise.all(
+        emergencyContacts.map((c) =>
+          updateDoc(doc(db, 'emergency_contacts', c.id), {
+            is_primary: c.id === contactId,
+          })
+        )
+      );
+      showNotice('Primary emergency contact updated.');
+      onRefresh();
+    } catch (err: any) {
+      showNotice(err?.message || 'Unable to update primary contact.', 'err');
+    }
   };
 
   const handleDeleteContact = async (id: string) => {
-    if (!supabase) return;
-    await supabase.from('emergency_contacts').delete().eq('id', id);
-    showNotice('Emergency contact deleted.');
-    onRefresh();
+    try {
+      await deleteDoc(doc(db, 'emergency_contacts', id));
+      showNotice('Emergency contact deleted.');
+      onRefresh();
+    } catch (err: any) {
+      showNotice(err?.message || 'Unable to remove emergency contact.', 'err');
+    }
   };
 
   const handleRequestRefund = async (paymentId: string) => {
-    const res = await fetch(`/api/payments/${paymentId}/refund`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${accessToken}`,
-      },
-      body: JSON.stringify({ reason: 'Customer requested refund' }),
-    });
-    const data = await res.json();
-    showNotice(
-      res.ok ? 'Refund request submitted.' : data.error || 'Refund request failed.',
-      res.ok ? 'ok' : 'err'
-    );
-    onRefresh();
+    try {
+      await updateDoc(doc(db, 'payments', paymentId), {
+        status: 'refund_requested',
+        refund_reason: 'Customer requested refund',
+        updated_at: new Date().toISOString(),
+      });
+      showNotice('Refund request submitted to SHINE CAB Billing Ops.');
+      onRefresh();
+    } catch (err: any) {
+      showNotice(err?.message || 'Refund request failed.', 'err');
+    }
   };
 
   const handleDownloadReceipt = (payment: PaymentRecord) => {
@@ -459,7 +487,7 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
       relatedRide ? `Pickup: ${relatedRide.pickup_address}` : '',
       relatedRide ? `Drop: ${relatedRide.drop_address}` : '',
       '====================================',
-      `Customer: ${userProfile?.full_name || userProfile?.phone || 'Customer'}`,
+      `Customer: ${userProfile?.full_name || userProfile?.phone || 'Customer'} (${displayShortId})`,
     ]
       .filter(Boolean)
       .join('\n');
@@ -496,21 +524,20 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
   };
 
   const handleLogout = async () => {
-    if (supabase) await supabase.auth.signOut();
-    onLoggedOut();
+    try {
+      await signOut(auth);
+    } finally {
+      onLoggedOut();
+    }
   };
 
   const handleDeleteAccount = async () => {
-    const res = await fetch('/api/account', {
-      method: 'DELETE',
-      headers: { Authorization: `Bearer ${accessToken}` },
-    });
-    if (res.ok) {
-      if (supabase) await supabase.auth.signOut();
+    try {
+      await deleteDoc(doc(db, 'users', customerUid));
+      await signOut(auth);
       onLoggedOut();
-    } else {
-      const data = await res.json();
-      showNotice(data.error || 'Unable to delete account.', 'err');
+    } catch (err: any) {
+      showNotice(err?.message || 'Unable to delete account.', 'err');
     }
   };
 
@@ -526,6 +553,13 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
       title: 'Personal Details & Photo',
       subtitle: userProfile?.email || userProfile?.phone || 'Name, email, photo & language',
       icon: User,
+    },
+    {
+      id: 'trips',
+      title: 'Trip History',
+      subtitle: `${rides.length} total trips · ${totalCompletedRides} completed`,
+      icon: History,
+      badge: rides.length > 0 ? `${rides.length}` : undefined,
     },
     {
       id: 'payments',
@@ -557,7 +591,7 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
     {
       id: 'notifications',
       title: 'Notification & Push Settings',
-      subtitle: `${unreadNotifications} unread alerts · FCM & SMS controls`,
+      subtitle: `${unreadNotifications} unread alerts · Live Alert controls`,
       icon: Bell,
       badge: unreadNotifications > 0 ? `${unreadNotifications}` : undefined,
     },
@@ -652,9 +686,14 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
                 )}
               </div>
               <div className="min-w-0 flex-1">
-                <p className="font-display text-base font-bold truncate">
-                  {userProfile?.full_name || 'SHINE CAB Rider'}
-                </p>
+                <div className="flex items-center justify-between gap-2">
+                  <p className="font-display text-base font-bold truncate">
+                    {userProfile?.full_name || 'SHINE CAB Rider'}
+                  </p>
+                  <span className="font-mono-num text-[11px] font-bold px-2 py-0.5 rounded-md bg-[#FFC928] text-[#111111] shrink-0">
+                    ID: {displayShortId}
+                  </span>
+                </div>
                 <p className="text-xs text-neutral-300 font-mono-num truncate">
                   {userProfile?.phone || '—'}
                 </p>
@@ -856,43 +895,86 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
             </div>
           </div>
 
-          {/* Recent Activity Snapshot */}
-          <div className="bg-white rounded-3xl border border-neutral-200 p-4 space-y-2.5">
-            <div className="flex items-center justify-between">
-              <h2 className="font-display text-sm font-bold text-[#111111]">
-                Recent Transactions & Trips
-              </h2>
-              <button
-                type="button"
-                onClick={() => setSection('payments')}
-                className="min-h-[36px] text-xs font-semibold text-[#111111] underline underline-offset-4 cursor-pointer"
-              >
-                View all
-              </button>
-            </div>
-            {rides.length === 0 && payments.length === 0 ? (
-              <p className="text-xs text-[#737373]">
-                No completed trips or payments recorded yet. Book your first Bike, Auto, or Cab
-                ride from Home.
-              </p>
-            ) : (
-              <div className="divide-y divide-neutral-100">
-                {rides.slice(0, 3).map((r) => (
-                  <div key={r.id} className="py-2.5 flex items-center justify-between gap-3 text-xs">
-                    <div className="min-w-0">
-                      <p className="font-semibold text-[#111111] truncate">
-                        {r.ride_code} · {r.drop_address}
-                      </p>
-                      <p className="text-[11px] text-[#737373]">
-                        {new Date(r.created_at).toLocaleDateString()} ·{' '}
-                        {r.status.replace(/_/g, ' ')}
-                      </p>
-                    </div>
-                    <span className="font-mono-num font-bold text-[#111111] shrink-0">
-                      ₹{Number(r.total_fare || 0).toFixed(0)}
-                    </span>
+          {/* Ride History Dropdown (Collapsed by Default) */}
+          <div className="bg-white rounded-3xl border border-neutral-200 overflow-hidden">
+            <button
+              type="button"
+              onClick={() => setRideHistoryDropdownOpen((prev) => !prev)}
+              aria-expanded={rideHistoryDropdownOpen}
+              className="w-full p-4 flex items-center justify-between gap-3 text-left hover:bg-neutral-50 transition cursor-pointer"
+            >
+              <div className="flex items-center gap-3 min-w-0">
+                <div className="w-9 h-9 rounded-xl bg-[#FFC928]/20 text-[#111111] flex items-center justify-center shrink-0">
+                  <History className="w-4 h-4" />
+                </div>
+                <div className="min-w-0">
+                  <h2 className="font-display text-sm font-bold text-[#111111]">
+                    Ride History
+                  </h2>
+                  <p className="text-[11px] text-[#737373] truncate">
+                    {rides.length === 0
+                      ? 'No trips recorded yet'
+                      : `${rides.length} ${rides.length === 1 ? 'trip' : 'trips'} · Tap to expand`}
+                  </p>
+                </div>
+              </div>
+              <div className="flex items-center gap-2 shrink-0">
+                {rides.length > 0 && (
+                  <span className="px-2 py-0.5 rounded-md bg-neutral-100 font-mono-num text-[11px] font-bold text-[#111111]">
+                    {rides.length}
+                  </span>
+                )}
+                {rideHistoryDropdownOpen ? (
+                  <ChevronUp className="w-4 h-4 text-neutral-500" />
+                ) : (
+                  <ChevronDown className="w-4 h-4 text-neutral-500" />
+                )}
+              </div>
+            </button>
+
+            {rideHistoryDropdownOpen && (
+              <div className="px-4 pb-4 pt-1 border-t border-neutral-100 space-y-3">
+                {rides.length === 0 ? (
+                  <p className="text-xs text-[#737373] py-2">
+                    No completed or past trips yet. Book your first Bike, Auto, or Cab ride from
+                    Home.
+                  </p>
+                ) : (
+                  <div className="divide-y divide-neutral-100">
+                    {rides.slice(0, 4).map((r) => (
+                      <button
+                        key={r.id}
+                        type="button"
+                        onClick={() => {
+                          setExpandedTripId(r.id);
+                          setSection('trips');
+                        }}
+                        className="w-full py-2.5 flex items-center justify-between gap-3 text-left text-xs hover:bg-neutral-50 rounded-xl px-1 cursor-pointer"
+                      >
+                        <div className="min-w-0">
+                          <p className="font-semibold text-[#111111] truncate">
+                            {r.ride_code} · {r.drop_address}
+                          </p>
+                          <p className="text-[11px] text-[#737373] capitalize">
+                            {new Date(r.created_at).toLocaleDateString()} ·{' '}
+                            {r.status.replace(/_/g, ' ')}
+                          </p>
+                        </div>
+                        <span className="font-mono-num font-bold text-[#111111] shrink-0">
+                          ₹{Number(r.total_fare || 0).toFixed(0)}
+                        </span>
+                      </button>
+                    ))}
                   </div>
-                ))}
+                )}
+
+                <button
+                  type="button"
+                  onClick={() => setSection('trips')}
+                  className="w-full min-h-[42px] rounded-xl bg-[#111111] text-[#FFC928] text-xs font-bold hover:bg-neutral-800 transition cursor-pointer"
+                >
+                  Open Trip History Page
+                </button>
               </div>
             )}
           </div>
@@ -922,7 +1004,12 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
                   )}
                 </div>
                 <div className="space-y-1.5 min-w-0 flex-1">
-                  <p className="text-xs font-bold text-[#111111]">Profile Photo</p>
+                  <div className="flex items-center justify-between gap-2">
+                    <p className="text-xs font-bold text-[#111111]">Profile Photo</p>
+                    <span className="font-mono-num text-[11px] font-bold px-2 py-0.5 rounded bg-[#FFC928]/30 text-[#111111]">
+                      ID: {displayShortId}
+                    </span>
+                  </div>
                   <p className="text-[11px] text-[#737373] font-mono-num truncate">
                     Phone: <strong className="text-[#111111]">{userProfile?.phone || '—'}</strong>
                   </p>
@@ -1020,9 +1107,9 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
                   </p>
                 </div>
                 <div>
-                  <p className="text-[10px] text-[#737373]">Rating</p>
+                  <p className="text-[10px] text-[#737373]">Customer ID</p>
                   <p className="font-mono-num font-bold text-[#111111] mt-0.5 text-[11px]">
-                    {Number(customerProfile?.rating_avg || 5).toFixed(2)} / 5
+                    {displayShortId}
                   </p>
                 </div>
                 <div>
@@ -1043,6 +1130,287 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
                 {saving ? 'Saving...' : 'Save Personal Details'}
               </button>
             </form>
+          )}
+
+          {/* 1B. TRIP HISTORY SUB-PAGE */}
+          {section === 'trips' && (
+            <div className="space-y-4">
+              {/* Filter & Summary Card */}
+              <div className="bg-white rounded-3xl border border-neutral-200 p-4 space-y-3.5">
+                <div className="flex items-center justify-between gap-2.5">
+                  <div className="min-w-0">
+                    <h2 className="font-display text-sm font-bold text-[#111111]">
+                      Your Trip History
+                    </h2>
+                    <p className="text-[11px] text-[#737373]">
+                      Filter trips by status or expand for fare details
+                    </p>
+                  </div>
+                  <select
+                    aria-label="Filter trip history"
+                    value={tripFilter}
+                    onChange={(e) =>
+                      setTripFilter(
+                        e.target.value as 'all' | 'completed' | 'active' | 'cancelled' | 'scheduled'
+                      )
+                    }
+                    className="h-10 rounded-xl border border-neutral-300 bg-[#F7F8FA] px-2.5 text-xs font-semibold text-[#111111] shrink-0 cursor-pointer"
+                  >
+                    <option value="all">All Trips ({rides.length})</option>
+                    <option value="completed">Completed ({totalCompletedRides})</option>
+                    <option value="active">Ongoing / Active</option>
+                    <option value="cancelled">Cancelled</option>
+                    <option value="scheduled">Scheduled ({scheduledRides.length})</option>
+                  </select>
+                </div>
+
+                <div className="grid grid-cols-3 gap-2 text-center">
+                  <div className="rounded-2xl bg-[#F7F8FA] border border-neutral-200 p-2.5">
+                    <p className="text-[10px] text-[#737373] font-medium">Total</p>
+                    <p className="font-mono-num text-sm font-bold text-[#111111]">
+                      {rides.length}
+                    </p>
+                  </div>
+                  <div className="rounded-2xl bg-green-50 border border-green-200 p-2.5">
+                    <p className="text-[10px] text-[#16A34A] font-medium">Completed</p>
+                    <p className="font-mono-num text-sm font-bold text-[#16A34A]">
+                      {totalCompletedRides}
+                    </p>
+                  </div>
+                  <div className="rounded-2xl bg-neutral-100 border border-neutral-200 p-2.5">
+                    <p className="text-[10px] text-[#737373] font-medium">Scheduled</p>
+                    <p className="font-mono-num text-sm font-bold text-[#111111]">
+                      {upcomingScheduledCount}
+                    </p>
+                  </div>
+                </div>
+              </div>
+
+              {tripFilter === 'scheduled' ? (
+                scheduledRides.length === 0 ? (
+                  <div className="bg-white rounded-3xl border border-neutral-200 p-6 text-center space-y-2">
+                    <CalendarClock className="w-8 h-8 text-neutral-300 mx-auto" />
+                    <p className="text-sm font-bold text-[#111111]">No Scheduled Trips</p>
+                    <p className="text-xs text-[#737373]">
+                      Schedule a future Bike, Auto, or Cab ride from the Home screen.
+                    </p>
+                  </div>
+                ) : (
+                  <div className="space-y-3">
+                    {scheduledRides.map((sr) => (
+                      <div
+                        key={sr.id}
+                        className="bg-white rounded-2xl border border-neutral-200 p-4 space-y-2.5 text-xs"
+                      >
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="font-bold text-[#111111]">
+                            {sr.vehicle_categories?.name || 'Ride'} ·{' '}
+                            <span className="capitalize">{sr.status.replace(/_/g, ' ')}</span>
+                          </span>
+                          <span className="font-mono-num font-bold text-[#111111]">
+                            ₹{Number(sr.estimated_fare || 0).toFixed(0)}
+                          </span>
+                        </div>
+                        <p className="text-[11px] font-mono-num text-[#737373]">
+                          {new Date(sr.scheduled_for).toLocaleString()}
+                        </p>
+                        <div className="space-y-1">
+                          <p className="truncate text-[#111111] font-medium">
+                            From: {sr.pickup_address}
+                          </p>
+                          <p className="truncate text-[#737373]">To: {sr.drop_address}</p>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )
+              ) : (() => {
+                const filteredTrips = rides.filter((r) => {
+                  if (tripFilter === 'completed') {
+                    return ['completed', 'ride_completed', 'payment_completed'].includes(r.status);
+                  }
+                  if (tripFilter === 'cancelled') {
+                    return ['cancelled', 'failed'].includes(r.status);
+                  }
+                  if (tripFilter === 'active') {
+                    return ![
+                      'completed',
+                      'ride_completed',
+                      'payment_completed',
+                      'cancelled',
+                      'failed',
+                    ].includes(r.status);
+                  }
+                  return true;
+                });
+
+                if (filteredTrips.length === 0) {
+                  return (
+                    <div className="bg-white rounded-3xl border border-neutral-200 p-6 text-center space-y-2">
+                      <History className="w-8 h-8 text-neutral-300 mx-auto" />
+                      <p className="text-sm font-bold text-[#111111]">No Trips Found</p>
+                      <p className="text-xs text-[#737373]">
+                        Trips matching this filter will appear here automatically.
+                      </p>
+                      <button
+                        type="button"
+                        onClick={() => onNavigateTab('home')}
+                        className="mt-1 min-h-[42px] px-4 rounded-xl bg-[#FFC928] text-[#111111] text-xs font-bold cursor-pointer"
+                      >
+                        Book a Ride
+                      </button>
+                    </div>
+                  );
+                }
+
+                return (
+                  <div className="space-y-3">
+                    {filteredTrips.map((r) => {
+                      const isExpanded = expandedTripId === r.id;
+                      const isCompleted = ['completed', 'ride_completed', 'payment_completed'].includes(
+                        r.status
+                      );
+                      const isCancelled = ['cancelled', 'failed'].includes(r.status);
+                      return (
+                        <div
+                          key={r.id}
+                          className="bg-white rounded-2xl border border-neutral-200 p-4 space-y-3"
+                        >
+                          <button
+                            type="button"
+                            onClick={() => setExpandedTripId(isExpanded ? null : r.id)}
+                            className="w-full text-left space-y-2.5 cursor-pointer"
+                          >
+                            <div className="flex items-center justify-between gap-2">
+                              <div className="flex items-center gap-1.5 min-w-0">
+                                <span className="font-mono-num text-xs font-bold text-[#111111]">
+                                  {r.ride_code}
+                                </span>
+                                <span
+                                  className={`px-2 py-0.5 rounded-md text-[10px] font-bold capitalize shrink-0 ${
+                                    isCompleted
+                                      ? 'bg-green-100 text-[#16A34A]'
+                                      : isCancelled
+                                        ? 'bg-red-100 text-[#DC2626]'
+                                        : 'bg-[#FFC928]/30 text-[#111111]'
+                                  }`}
+                                >
+                                  {r.status.replace(/_/g, ' ')}
+                                </span>
+                              </div>
+                              <span className="font-mono-num text-sm font-bold text-[#111111] shrink-0">
+                                ₹{Number(r.total_fare || 0).toFixed(0)}
+                              </span>
+                            </div>
+
+                            <div className="space-y-1.5 text-xs">
+                              <div className="flex items-center gap-2">
+                                <span className="w-2 h-2 rounded-full bg-[#16A34A] shrink-0" />
+                                <span className="truncate text-[#111111] font-medium">
+                                  {r.pickup_address}
+                                </span>
+                              </div>
+                              <div className="flex items-center gap-2">
+                                <span className="w-2 h-2 rounded-sm bg-[#111111] shrink-0" />
+                                <span className="truncate text-[#737373]">{r.drop_address}</span>
+                              </div>
+                            </div>
+
+                            <div className="flex items-center justify-between text-[11px] text-[#737373]">
+                              <span className="font-mono-num">
+                                {new Date(r.created_at).toLocaleString()}
+                              </span>
+                              <span className="inline-flex items-center gap-1 font-semibold text-[#111111]">
+                                <span>{isExpanded ? 'Hide Details' : 'Details'}</span>
+                                {isExpanded ? (
+                                  <ChevronUp className="w-3.5 h-3.5" />
+                                ) : (
+                                  <ChevronDown className="w-3.5 h-3.5" />
+                                )}
+                              </span>
+                            </div>
+                          </button>
+
+                          {isExpanded && (
+                            <div className="pt-3 border-t border-neutral-100 space-y-2.5 text-xs">
+                              <div className="rounded-xl bg-[#F7F8FA] p-3 space-y-1.5">
+                                <div className="flex justify-between">
+                                  <span className="text-[#737373]">Vehicle & Payment</span>
+                                  <span className="font-semibold text-[#111111] uppercase">
+                                    {r.vehicle_categories?.name || r.vehicle_slug || 'Cab'} ·{' '}
+                                    {r.payment_method}
+                                  </span>
+                                </div>
+                                <div className="flex justify-between">
+                                  <span className="text-[#737373]">Distance & Duration</span>
+                                  <span className="font-mono-num text-[#111111]">
+                                    {(Number(r.distance_meters || 0) / 1000).toFixed(2)} km ·{' '}
+                                    {Math.max(1, Math.round(Number(r.duration_seconds || 0) / 60))}{' '}
+                                    min
+                                  </span>
+                                </div>
+                                {r.drivers?.users?.full_name && (
+                                  <div className="flex justify-between">
+                                    <span className="text-[#737373]">Captain</span>
+                                    <span className="font-semibold text-[#111111]">
+                                      {r.drivers.users.full_name}
+                                    </span>
+                                  </div>
+                                )}
+                                <div className="flex justify-between">
+                                  <span className="text-[#737373]">Base + Distance Fare</span>
+                                  <span className="font-mono-num text-[#111111]">
+                                    ₹
+                                    {(
+                                      Number(r.base_fare || 0) + Number(r.distance_fare || 0)
+                                    ).toFixed(2)}
+                                  </span>
+                                </div>
+                                {Number(r.discount_amount || 0) > 0 && (
+                                  <div className="flex justify-between text-[#16A34A]">
+                                    <span>Discount</span>
+                                    <span className="font-mono-num">
+                                      -₹{Number(r.discount_amount).toFixed(2)}
+                                    </span>
+                                  </div>
+                                )}
+                                <div className="flex justify-between pt-1.5 border-t border-neutral-200 font-bold text-[#111111]">
+                                  <span>Total Paid</span>
+                                  <span className="font-mono-num">
+                                    ₹{Number(r.total_fare || 0).toFixed(2)}
+                                  </span>
+                                </div>
+                              </div>
+
+                              <div className="flex items-center gap-2">
+                                {r.drivers && (
+                                  <button
+                                    type="button"
+                                    onClick={() => onNavigateTab('chat')}
+                                    className="flex-1 min-h-[40px] rounded-xl bg-[#FFC928] text-[#111111] font-bold text-xs inline-flex items-center justify-center gap-1.5 cursor-pointer"
+                                  >
+                                    <MessageSquare className="w-3.5 h-3.5" />
+                                    <span>Driver Chat</span>
+                                  </button>
+                                )}
+                                <button
+                                  type="button"
+                                  onClick={() => onNavigateTab('support')}
+                                  className="flex-1 min-h-[40px] rounded-xl bg-[#111111] text-white font-semibold text-xs inline-flex items-center justify-center gap-1.5 cursor-pointer"
+                                >
+                                  <LifeBuoy className="w-3.5 h-3.5 text-[#FFC928]" />
+                                  <span>Need Help</span>
+                                </button>
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                );
+              })()}
+            </div>
           )}
 
           {/* 2. PAYMENTS, METHODS & RECEIPTS */}
@@ -1123,7 +1491,7 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
                             <Download className="w-3.5 h-3.5" />
                             <span>Receipt</span>
                           </button>
-                          {p.status === 'captured' && (
+                          {(p.status === 'captured' || p.status === 'paid') && (
                             <button
                               type="button"
                               onClick={() => handleRequestRefund(p.id)}
@@ -1151,7 +1519,7 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
                     Saved Places (Home, Office & Stops)
                   </h2>
                   <p className="text-[11px] text-[#737373]">
-                    Verified via Google Maps Geocoding for instant 1-tap drop selection.
+                    Verified via OpenStreetMap Nominatim for instant 1-tap drop selection.
                   </p>
                 </div>
               </div>
@@ -1219,7 +1587,7 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
                   <input
                     type="text"
                     required
-                    placeholder="Street address or landmark"
+                    placeholder="City, town, road or landmark (e.g. Godda)"
                     value={addrLine}
                     onChange={(e) => setAddrLine(e.target.value)}
                     className="flex-1 min-w-0 h-11 rounded-xl border border-neutral-300 px-3 text-xs"
@@ -1240,7 +1608,6 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
           {/* 4. SAFETY CENTER, EMERGENCY CONTACTS & SOS LOGS */}
           {section === 'safety' && (
             <div className="space-y-4">
-              {/* Quick SOS & Helplines */}
               <div className="bg-white rounded-3xl border border-neutral-200 p-4 space-y-3.5">
                 <div className="space-y-1">
                   <h2 className="font-display text-sm font-bold text-[#111111]">
@@ -1282,7 +1649,6 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
                 </div>
               </div>
 
-              {/* Emergency Contacts Manager */}
               <div className="bg-white rounded-3xl border border-neutral-200 p-4 space-y-3.5">
                 <div className="flex items-center gap-2">
                   <Shield className="w-4 h-4 text-[#DC2626]" />
@@ -1382,7 +1748,6 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
                 </form>
               </div>
 
-              {/* SOS Alert History */}
               <div className="bg-white rounded-3xl border border-neutral-200 p-4 space-y-2.5">
                 <h2 className="font-display text-sm font-bold text-[#111111]">SOS Alert History</h2>
                 {sosAlerts.length === 0 ? (
@@ -1481,7 +1846,8 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
                       <div key={u.id} className="py-2.5 flex items-center justify-between gap-2 text-xs">
                         <div className="min-w-0">
                           <p className="font-semibold text-[#111111] truncate">
-                            {u.coupons?.code || 'PROMO'} · {u.coupons?.title || 'Ride Discount'}
+                            {u.coupons?.code || u.coupon_code || 'PROMO'} ·{' '}
+                            {u.coupons?.title || 'Ride Discount'}
                           </p>
                           <p className="text-[11px] text-[#737373]">
                             {new Date(u.used_at).toLocaleString()}
@@ -1572,7 +1938,7 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
                 >
                   {customerProfile?.fcm_token
                     ? 'Refresh Device Push Token'
-                    : 'Register Device for Firebase Push'}
+                    : 'Register Device for Push'}
                 </button>
                 <button
                   type="button"
@@ -1649,51 +2015,6 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
                     <RotateCcw className="w-3.5 h-3.5" />
                     <span>Replay Onboarding</span>
                   </button>
-                </div>
-
-                <div className="pt-3 border-t border-neutral-100 space-y-2.5">
-                  <div>
-                    <p className="text-xs font-bold text-[#111111]">Project Source Code (.zip)</p>
-                    <p className="text-[11px] text-[#737373]">
-                      Download the complete SHINE CAB codebase archive (`shine-cab-source.zip`).
-                    </p>
-                  </div>
-                  <a
-                    href="/api/source-zip"
-                    download="shine-cab-source.zip"
-                    className="w-full min-h-[44px] px-3.5 rounded-xl bg-[#111111] text-[#FFC928] text-xs font-bold inline-flex items-center justify-center gap-1.5 hover:bg-neutral-800 cursor-pointer"
-                  >
-                    <Download className="w-4 h-4" />
-                    <span>Download Source Code (.zip)</span>
-                  </a>
-                </div>
-              </div>
-
-              <div className="bg-white rounded-3xl border border-neutral-200 p-4 space-y-3">
-                <h3 className="font-display text-sm font-bold text-[#111111]">
-                  Connected Platform Services
-                </h3>
-                <div className="grid grid-cols-2 gap-2.5 text-xs">
-                  {[
-                    { label: 'Google Maps', ok: config.services.maps },
-                    { label: 'Supabase DB', ok: config.services.supabase },
-                    { label: 'Razorpay', ok: config.services.razorpay },
-                    { label: 'Firebase Push', ok: config.services.fcm },
-                  ].map((s) => (
-                    <div
-                      key={s.label}
-                      className="rounded-xl border border-neutral-200 p-3 space-y-1"
-                    >
-                      <p className="font-semibold text-[#111111]">{s.label}</p>
-                      <p
-                        className={`text-[11px] font-semibold ${
-                          s.ok ? 'text-[#16A34A]' : 'text-[#737373]'
-                        }`}
-                      >
-                        {s.ok ? 'Configured' : 'Not configured'}
-                      </p>
-                    </div>
-                  ))}
                 </div>
               </div>
             </div>

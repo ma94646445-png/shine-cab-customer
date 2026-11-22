@@ -239,9 +239,6 @@ async function startServer() {
       wss.handleUpgrade(req, socket, head, (ws) => {
         wss.emit('connection', ws, req);
       });
-    } else if (!isProduction && pathname === '/vite-ws') {
-      // Handled by Vite dev WebSocket listener attached via server.ws
-      return;
     } else {
       socket.destroy();
     }

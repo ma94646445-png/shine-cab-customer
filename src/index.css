@@ -12,10 +12,12 @@
     --shine-muted: #737373;
   }
 
-  html {
+  html, body {
     font-family: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, sans-serif;
     scroll-behavior: smooth;
     -webkit-tap-highlight-color: transparent;
+    overflow-x: hidden;
+    overscroll-behavior-y: none;
   }
 
   h1, h2, h3, .font-display {

@@ -9,14 +9,14 @@ import {
   MessageSquare,
   Car,
 } from 'lucide-react';
-import { SupabaseClient } from '@supabase/supabase-js';
+import { doc, updateDoc } from 'firebase/firestore';
+import { db, handleFirestoreError, OperationType } from '../lib/firebase';
 import { RideRecord, ScheduledRide } from '../types/shinecab';
 
 interface RidesHistoryViewProps {
   rides: RideRecord[];
   scheduledRides: ScheduledRide[];
   loading: boolean;
-  supabase: SupabaseClient | null;
   onRefresh: () => void;
   onCreateSupportForRide: (rideId: string) => void;
   onOpenDriverChat?: (rideId: string) => void;
@@ -28,7 +28,6 @@ export const RidesHistoryView: React.FC<RidesHistoryViewProps> = ({
   rides,
   scheduledRides,
   loading,
-  supabase,
   onRefresh,
   onCreateSupportForRide,
   onOpenDriverChat,
@@ -39,20 +38,28 @@ export const RidesHistoryView: React.FC<RidesHistoryViewProps> = ({
 
   const filteredRides = rides.filter((r) => {
     if (tab === 'driver_history') return Boolean(r.drivers || r.driver_id);
-    if (tab === 'completed') return ['ride_completed', 'payment_completed'].includes(r.status);
+    if (tab === 'completed') {
+      return ['completed', 'ride_completed', 'payment_completed'].includes(r.status);
+    }
     if (tab === 'cancelled') return ['cancelled', 'failed'].includes(r.status);
     return tab === 'all';
   });
 
   const handleCancelScheduled = async (id: string) => {
-    if (!supabase) return;
     setCancellingId(id);
     try {
-      await supabase
-        .from('scheduled_rides')
-        .update({ status: 'cancelled', cancellation_reason: 'Cancelled by customer' })
-        .eq('id', id);
+      await updateDoc(doc(db, 'scheduled_rides', id), {
+        status: 'cancelled',
+        cancellation_reason: 'Cancelled by customer',
+        updated_at: new Date().toISOString(),
+      });
       onRefresh();
+    } catch (err) {
+      try {
+        handleFirestoreError(err, OperationType.UPDATE, `scheduled_rides/${id}`);
+      } catch {
+        // logged
+      }
     } finally {
       setCancellingId(null);
     }
@@ -178,7 +185,10 @@ export const RidesHistoryView: React.FC<RidesHistoryViewProps> = ({
                         {ride.ride_code}
                       </span>
                       <span aria-hidden="true">·</span>
-                      <span>{ride.vehicle_categories?.name || 'Cab'}</span>
+                      <span>
+                        {ride.vehicle_categories?.name ||
+                          (ride.vehicle_slug ? ride.vehicle_slug.toUpperCase() : 'Cab')}
+                      </span>
                       <span aria-hidden="true">·</span>
                       <span>{new Date(ride.created_at).toLocaleDateString()}</span>
                     </div>
@@ -245,7 +255,7 @@ export const RidesHistoryView: React.FC<RidesHistoryViewProps> = ({
                         <span>Call</span>
                       </a>
                     )}
-                    {ride.drivers && onOpenDriverChat && (
+                    {(ride.drivers || ride.driver_id) && onOpenDriverChat && (
                       <button
                         type="button"
                         onClick={() => onOpenDriverChat(ride.id)}
@@ -272,8 +282,8 @@ export const RidesHistoryView: React.FC<RidesHistoryViewProps> = ({
 
       {/* Ride Detail Bottom Sheet */}
       {selectedRide && (
-        <div className="fixed inset-0 z-50 bg-black/50 backdrop-blur-sm flex items-end justify-center">
-          <div className="bg-white rounded-t-3xl w-full p-5 pb-safe shadow-2xl border-t border-neutral-200 max-h-[88%] overflow-y-auto space-y-4">
+        <div className="fixed inset-0 z-[500] bg-black/50 backdrop-blur-sm flex items-end justify-center">
+          <div className="bg-white rounded-t-3xl w-full max-w-md p-5 pb-[max(env(safe-area-inset-bottom),20px)] shadow-2xl border-t border-neutral-200 max-h-[88dvh] overflow-y-auto space-y-4">
             <div className="w-10 h-1 bg-neutral-300 rounded-full mx-auto" />
             <div className="flex items-center justify-between">
               <div>

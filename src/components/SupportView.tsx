@@ -15,13 +15,13 @@ import {
   Languages,
   X,
 } from 'lucide-react';
-import { SupabaseClient } from '@supabase/supabase-js';
+import { addDoc, collection, onSnapshot, query, where } from 'firebase/firestore';
+import { db, handleFirestoreError, OperationType } from '../lib/firebase';
 import { SupportMessage, SupportTicket } from '../types/shinecab';
 
 interface SupportViewProps {
-  supabase: SupabaseClient | null;
-  userId: string | null;
-  customerId: string | null;
+  userId: string;
+  customerId: string;
   tickets: SupportTicket[];
   preselectedRideId?: string | null;
   onTicketsChanged: () => void;
@@ -51,31 +51,25 @@ const INDIAN_LANGUAGES = [
   { value: 'Punjabi', label: 'ਪੰਜਾਬੀ (Punjabi)' },
   { value: 'Odia', label: 'ଓଡ଼ିଆ (Odia)' },
   { value: 'Urdu', label: 'اردو (Urdu)' },
-  { value: 'Assamese', label: 'অসমীয়া (Assamese)' },
   { value: 'Bhojpuri', label: 'भोजपुरी (Bhojpuri)' },
-  { value: 'Maithili', label: 'मैथिली (Maithili)' },
-  { value: 'Nepali', label: 'नेपाली (Nepali)' },
-  { value: 'Konkani', label: 'कोंकणी (Konkani)' },
-  { value: 'Manipuri', label: 'মৈতৈলোন্ (Manipuri)' },
-  { value: 'Santali', label: 'ᱥᱟᱱᱛᱟᱲᱤ (Santali)' },
 ];
 
 const FAQS = [
   {
     q: 'How is my SHINE CAB fare calculated?',
-    a: 'Fares are calculated from base fare, real route distance in km, ride duration, applicable taxes, and validated promo discounts.',
+    a: 'Fares are calculated automatically from live admin tariff rules (base fare, per-km distance rate, minimum fare, surge multiplier if any, and validated promo coupon discounts).',
   },
   {
     q: 'How does Ride OTP verification work?',
     a: 'When your assigned driver arrives at pickup, verify the captain and vehicle number plate, then share the 4-digit OTP shown on your active ride card to start the trip.',
   },
   {
-    q: 'What if a Razorpay payment fails or needs a refund?',
-    a: 'Failed transactions are logged automatically without double charging. For captured payments, you can request a refund from Profile -> Payments & Receipts or open a ticket below.',
+    q: 'What if a payment fails or needs a refund?',
+    a: 'Failed transactions are logged automatically without double charging. You can request a refund directly from Profile -> Payments & Receipts or open a support ticket below.',
   },
   {
     q: 'How do I report a lost item or safety concern?',
-    a: 'Ask the Support Bot for instant guidance, open a ticket using the Lost Item or Safety category below, or trigger Emergency SOS immediately.',
+    a: 'Open a support ticket using the Lost Item or Safety category below, or trigger Emergency SOS immediately for 24x7 Safety Ops dispatch.',
   },
 ];
 
@@ -87,8 +81,42 @@ const QUICK_PROMPTS = [
   'Ride OTP aur SOS safety kaise kaam karti hai?',
 ];
 
+function getSmartFallbackBotReply(prompt: string, language: string): string {
+  const lower = prompt.toLowerCase();
+  const isEnglishOnly = language === 'English';
+
+  if (lower.includes('kiraya') || lower.includes('fare') || lower.includes('price') || lower.includes('rate')) {
+    return isEnglishOnly
+      ? 'SHINE CAB fares use real OpenStreetMap road distance plus live Admin tariffs (base fare + per-km rate + minimum fare). You can apply valid coupon codes on the Home booking sheet before confirming.'
+      : 'SHINE CAB mein kiraya live Admin tariff (base fare + per km rate + minimum fare) aur OpenStreetMap road distance ke hisaab se calculate hota hai. Book karne se pehle aap Promo Code bhi apply kar sakte hain.';
+  }
+  if (lower.includes('refund') || lower.includes('payment') || lower.includes('paisa') || lower.includes('upi')) {
+    return isEnglishOnly
+      ? 'For payment or refund help, go to Profile -> Payments, Methods & Receipts and tap "Request Refund" on your transaction, or create a Payment & Refund support ticket below.'
+      : 'Payment ya refund ke liye Profile -> Payments & Receipts mein jaakar "Request Refund" par tap karein, ya neeche "Payment & Refund" category ke saath ek Support Ticket banayein.';
+  }
+  if (lower.includes('saman') || lower.includes('lost') || lower.includes('item') || lower.includes('bag')) {
+    return isEnglishOnly
+      ? 'If you left an item in the cab, check My Rides -> Driver History to call or chat with your captain immediately, and submit a "Lost Item Report" ticket below with your Ride Code.'
+      : 'Agar gaadi mein koi saman chut gaya hai, to My Rides -> Driver History mein jaakar apne driver ko turant Call/Chat karein, aur neeche "Lost Item Report" ticket zaroor submit karein.';
+  }
+  if (lower.includes('otp') || lower.includes('sos') || lower.includes('safety')) {
+    return isEnglishOnly
+      ? 'Your unique 4-digit Ride OTP appears on the Active Ride card. Share it only when sitting inside the cab. In any emergency, tap the red SOS button anytime for instant helpline (112) & live location alert.'
+      : 'Aapka 4-digit Ride OTP Active Ride card par dikhta hai — gaadi mein baithne ke baad hi driver ko batayein. Kisi bhi emergency mein upar laal SOS button dabayein (112 helpline aur live alert ke liye).';
+  }
+  if (lower.includes('book') || lower.includes('driver') || lower.includes('nearby') || lower.includes('pickup')) {
+    return isEnglishOnly
+      ? 'On the Home screen, tap Current GPS or search any village/city/road in Pickup & Drop, pick Bike, Auto, or Cab, and tap Book Ride. Nearby online drivers are notified immediately.'
+      : 'Home screen par Pickup aur Drop address search karein (ya Current GPS dabayein), Bike/Auto/Cab chunein, aur Book Ride par tap karein. Aas-paas ke verified drivers turant live dikhte hain.';
+  }
+
+  return isEnglishOnly
+    ? 'Thank you for contacting SHINE CAB Support! For instant help with any ride, fare, lost item, or payment issue, please create a Support Ticket right below and our team will respond shortly.'
+    : 'SHINE CAB Support se sampark karne ke liye dhanyavaad! Kisi bhi ride, kiraya, payment ya lost item ki madad ke liye aap neeche "Create Support Ticket" form submit kar sakte hain. Humari team turant madad karegi.';
+}
+
 export const SupportView: React.FC<SupportViewProps> = ({
-  supabase,
   userId,
   customerId,
   tickets,
@@ -97,13 +125,12 @@ export const SupportView: React.FC<SupportViewProps> = ({
   onTriggerSos,
 }) => {
   const [openFaq, setOpenFaq] = useState<number | null>(0);
-  const [category, setCategory] = useState<SupportTicket['category']>(
-    preselectedRideId ? 'ride' : 'ride'
-  );
+  const [category, setCategory] = useState<SupportTicket['category']>('ride');
   const [subject, setSubject] = useState('');
   const [description, setDescription] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
+  const [formSuccess, setFormSuccess] = useState<string | null>(null);
   const [activeTicket, setActiveTicket] = useState<SupportTicket | null>(null);
   const [messages, setMessages] = useState<SupportMessage[]>([]);
   const [replyText, setReplyText] = useState('');
@@ -113,7 +140,7 @@ export const SupportView: React.FC<SupportViewProps> = ({
     {
       id: 'welcome',
       role: 'model',
-      text: 'Namaste! Main Shine hoon. Aap kisi bhi Indian language mein type ya mic se bolkar pooch sakte hain — ride booking, kiraya, refund, driver chat, ya safety.',
+      text: 'Namaste! Main Shine hoon. Aap kisi bhi Indian language mein type ya pooch sakte hain — ride booking, kiraya, refund, driver chat, ya safety.',
       time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
     },
   ]);
@@ -162,44 +189,49 @@ export const SupportView: React.FC<SupportViewProps> = ({
     };
   }, []);
 
+  // Real-time Firestore listener for ticket messages
   useEffect(() => {
-    if (!supabase || !activeTicket) return;
-    const loadMessages = async () => {
-      const { data } = await supabase
-        .from('support_messages')
-        .select('*')
-        .eq('ticket_id', activeTicket.id)
-        .order('created_at', { ascending: true });
-      setMessages((data as SupportMessage[]) || []);
-    };
-    loadMessages();
+    if (!activeTicket || !userId) {
+      setMessages([]);
+      return;
+    }
 
-    const channel = supabase
-      .channel(`ticket-${activeTicket.id}`)
-      .on(
-        'postgres_changes',
-        {
-          event: 'INSERT',
-          schema: 'public',
-          table: 'support_messages',
-          filter: `ticket_id=eq.${activeTicket.id}`,
-        },
-        (payload) => {
-          const msg = payload.new as SupportMessage;
-          setMessages((prev) => (prev.some((m) => m.id === msg.id) ? prev : [...prev, msg]));
-        }
-      )
-      .subscribe();
+    const q = query(
+      collection(db, 'support_messages'),
+      where('ticket_id', '==', activeTicket.id),
+      where('customer_uid', '==', userId)
+    );
 
-    return () => {
-      supabase.removeChannel(channel);
-    };
-  }, [supabase, activeTicket]);
+    const unsub = onSnapshot(
+      q,
+      (snap) => {
+        const list = snap.docs
+          .map((d) => ({ id: d.id, ...(d.data() as Record<string, any>) }) as SupportMessage)
+          .sort(
+            (a, b) =>
+              new Date(a.created_at || 0).getTime() - new Date(b.created_at || 0).getTime()
+          );
+        setMessages(list);
+      },
+      (err) => {
+        console.error('Support messages listener error:', err);
+      }
+    );
+
+    return () => unsub();
+  }, [activeTicket, userId]);
 
   const stopAudioPlayback = () => {
     if (activeAudioRef.current) {
       activeAudioRef.current.pause();
       activeAudioRef.current = null;
+    }
+    if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
+      try {
+        window.speechSynthesis.cancel();
+      } catch {
+        // ignore
+      }
     }
     setSpeakingId(null);
   };
@@ -219,24 +251,35 @@ export const SupportView: React.FC<SupportViewProps> = ({
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ text: clean }),
       });
-      const data = await res.json();
-      if (!res.ok || !data.audioBase64) {
-        setSpeakingId(null);
+      const ct = res.headers.get('content-type') || '';
+      if (res.ok && ct.includes('application/json')) {
+        const data = await res.json();
+        if (data.audioBase64) {
+          const audio = new Audio(`data:${data.mimeType || 'audio/wav'};base64,${data.audioBase64}`);
+          activeAudioRef.current = audio;
+          audio.onended = () => {
+            if (activeAudioRef.current === audio) activeAudioRef.current = null;
+            setSpeakingId(null);
+          };
+          audio.onerror = () => {
+            if (activeAudioRef.current === audio) activeAudioRef.current = null;
+            setSpeakingId(null);
+          };
+          await audio.play().catch(() => setSpeakingId(null));
+          return;
+        }
+      }
+
+      // Safe Web Speech fallback in Android WebView / browser
+      if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
+        const utter = new SpeechSynthesisUtterance(clean);
+        utter.lang = selectedLanguage === 'English' ? 'en-IN' : 'hi-IN';
+        utter.onend = () => setSpeakingId(null);
+        utter.onerror = () => setSpeakingId(null);
+        window.speechSynthesis.speak(utter);
         return;
       }
-      const audio = new Audio(`data:${data.mimeType || 'audio/wav'};base64,${data.audioBase64}`);
-      activeAudioRef.current = audio;
-      audio.onended = () => {
-        if (activeAudioRef.current === audio) activeAudioRef.current = null;
-        setSpeakingId(null);
-      };
-      audio.onerror = () => {
-        if (activeAudioRef.current === audio) activeAudioRef.current = null;
-        setSpeakingId(null);
-      };
-      await audio.play().catch(() => {
-        setSpeakingId(null);
-      });
+      setSpeakingId(null);
     } catch {
       setSpeakingId(null);
     }
@@ -279,9 +322,16 @@ export const SupportView: React.FC<SupportViewProps> = ({
       });
 
       const contentType = res.headers.get('content-type') || '';
-      if (!res.ok || !res.body || contentType.includes('application/json')) {
-        const data = await res.json().catch(() => ({}));
-        setBotError(data.error || 'Shine is temporarily unavailable.');
+      if (!res.ok || !res.body || contentType.includes('text/html') || contentType.includes('application/json')) {
+        // Offline / static WebView fallback — never throw Unexpected token '<'
+        const fallbackText = getSmartFallbackBotReply(trimmed, selectedLanguage);
+        setBotMessages((prev) => [
+          ...prev,
+          { id: botMsgId, role: 'model', text: fallbackText, time: botTime },
+        ]);
+        if (options?.viaVoice && autoSpeak) {
+          void speakText(botMsgId, fallbackText);
+        }
         return;
       }
 
@@ -309,7 +359,11 @@ export const SupportView: React.FC<SupportViewProps> = ({
               error?: string;
             };
             if (payload.error) {
-              setBotError(payload.error);
+              const fallbackText = getSmartFallbackBotReply(trimmed, selectedLanguage);
+              setBotMessages((prev) => [
+                ...prev,
+                { id: botMsgId, role: 'model', text: fallbackText, time: botTime },
+              ]);
               return;
             }
             if (payload.chunk) {
@@ -334,11 +388,24 @@ export const SupportView: React.FC<SupportViewProps> = ({
         }
       }
 
+      if (!insertedBotBubble) {
+        const fallbackText = getSmartFallbackBotReply(trimmed, selectedLanguage);
+        accumulatedReply = fallbackText;
+        setBotMessages((prev) => [
+          ...prev,
+          { id: botMsgId, role: 'model', text: fallbackText, time: botTime },
+        ]);
+      }
+
       if (options?.viaVoice && autoSpeak && accumulatedReply.trim()) {
         void speakText(botMsgId, accumulatedReply);
       }
     } catch {
-      setBotError('Network error while connecting to Shine.');
+      const fallbackText = getSmartFallbackBotReply(trimmed, selectedLanguage);
+      setBotMessages((prev) => [
+        ...prev,
+        { id: botMsgId, role: 'model', text: fallbackText, time: botTime },
+      ]);
     } finally {
       setBotLoading(false);
     }
@@ -406,6 +473,11 @@ export const SupportView: React.FC<SupportViewProps> = ({
               language: selectedLanguage,
             }),
           });
+          const ct = res.headers.get('content-type') || '';
+          if (!ct.includes('application/json')) {
+            setBotError('Voice server unavailable right now. Please type your message below.');
+            return;
+          }
           const data = await res.json();
           if (!res.ok || !data.text) {
             setBotError(data.error || 'Could not understand audio. Please try again.');
@@ -413,7 +485,7 @@ export const SupportView: React.FC<SupportViewProps> = ({
           }
           await sendToBot(data.text, { viaVoice: true });
         } catch {
-          setBotError('Voice processing failed. Please check mic permissions and try again.');
+          setBotError('Voice processing unavailable. Please type your message below.');
         } finally {
           setTranscribing(false);
         }
@@ -453,10 +525,9 @@ export const SupportView: React.FC<SupportViewProps> = ({
   const handleCreateTicket = async (e: React.FormEvent) => {
     e.preventDefault();
     setFormError(null);
-    if (!supabase || !customerId || !userId) {
-      setFormError(
-        'Ticket history sync requires signed-in Supabase account. Chat with Shine above for instant help anytime.'
-      );
+    setFormSuccess(null);
+    if (!userId) {
+      setFormError('Please sign in to submit a support ticket.');
       return;
     }
     if (!subject.trim() || !description.trim()) {
@@ -465,38 +536,46 @@ export const SupportView: React.FC<SupportViewProps> = ({
     }
 
     setSubmitting(true);
+    const nowIso = new Date().toISOString();
+    const ticketNumber = `TKT-${Date.now().toString().slice(-6)}`;
+
     try {
-      const ticketNumber = `TKT-${Date.now().toString().slice(-6)}`;
-      const { data: ticket, error } = await supabase
-        .from('support_tickets')
-        .insert({
-          ticket_number: ticketNumber,
-          customer_id: customerId,
-          ride_id: preselectedRideId || null,
-          category,
-          subject: subject.trim(),
-          description: description.trim(),
-          priority: category === 'safety' ? 'urgent' : 'normal',
-        })
-        .select('*')
-        .single();
+      const payload = {
+        ticket_number: ticketNumber,
+        customer_id: customerId || userId,
+        customer_uid: userId,
+        ride_id: preselectedRideId || null,
+        category,
+        subject: subject.trim(),
+        description: description.trim(),
+        priority: category === 'safety' ? ('urgent' as const) : ('normal' as const),
+        status: 'open' as const,
+        created_at: nowIso,
+      };
 
-      if (error || !ticket) {
-        setFormError(error?.message || 'Unable to submit support ticket.');
-        return;
-      }
+      const ticketRef = await addDoc(collection(db, 'support_tickets'), payload);
 
-      await supabase.from('support_messages').insert({
-        ticket_id: ticket.id,
+      await addDoc(collection(db, 'support_messages'), {
+        ticket_id: ticketRef.id,
+        customer_uid: userId,
         sender_id: userId,
         sender_role: 'customer',
         message: description.trim(),
+        created_at: nowIso,
       });
 
       setSubject('');
       setDescription('');
-      setActiveTicket(ticket as SupportTicket);
+      setFormSuccess(`Ticket ${ticketNumber} created successfully.`);
+      setActiveTicket({ id: ticketRef.id, ...payload });
       onTicketsChanged();
+    } catch (err) {
+      setFormError('Unable to submit support ticket. Please try again.');
+      try {
+        handleFirestoreError(err, OperationType.CREATE, 'support_tickets');
+      } catch {
+        // logged
+      }
     } finally {
       setSubmitting(false);
     }
@@ -504,15 +583,26 @@ export const SupportView: React.FC<SupportViewProps> = ({
 
   const handleSendReply = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!supabase || !activeTicket || !userId || !replyText.trim()) return;
+    if (!activeTicket || !userId || !replyText.trim()) return;
     const text = replyText.trim();
     setReplyText('');
-    await supabase.from('support_messages').insert({
-      ticket_id: activeTicket.id,
-      sender_id: userId,
-      sender_role: 'customer',
-      message: text,
-    });
+    try {
+      await addDoc(collection(db, 'support_messages'), {
+        ticket_id: activeTicket.id,
+        customer_uid: userId,
+        sender_id: userId,
+        sender_role: 'customer',
+        message: text,
+        created_at: new Date().toISOString(),
+      });
+    } catch (err) {
+      setReplyText(text);
+      try {
+        handleFirestoreError(err, OperationType.CREATE, 'support_messages');
+      } catch {
+        // logged
+      }
+    }
   };
 
   return (
@@ -545,7 +635,7 @@ export const SupportView: React.FC<SupportViewProps> = ({
               <div className="min-w-0">
                 <h2 className="font-display text-sm font-bold truncate">Shine</h2>
                 <p className="text-[11px] text-neutral-300 truncate">
-                  All Indian Languages · Fast Voice & Text
+                  All Indian Languages · Instant Help
                 </p>
               </div>
             </div>
@@ -558,7 +648,7 @@ export const SupportView: React.FC<SupportViewProps> = ({
                   {
                     id: 'welcome',
                     role: 'model',
-                    text: 'Namaste! Main Shine hoon. Aap kisi bhi Indian language mein type ya mic se bolkar pooch sakte hain — ride booking, kiraya, refund, driver chat, ya safety.',
+                    text: 'Namaste! Main Shine hoon. Aap kisi bhi Indian language mein type ya pooch sakte hain — ride booking, kiraya, refund, driver chat, ya safety.',
                     time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
                   },
                 ]);
@@ -623,19 +713,19 @@ export const SupportView: React.FC<SupportViewProps> = ({
         </div>
 
         {/* Chat Messages Feed */}
-        <div className="p-3.5 space-y-3 h-[300px] overflow-y-auto bg-white">
+        <div className="p-3.5 space-y-3 h-[280px] overflow-y-auto bg-white">
           {botMessages.map((msg) => {
             const isUser = msg.role === 'user';
             const isPlayingThis = speakingId === msg.id;
             return (
               <div
                 key={msg.id}
-                className={`flex flex-col max-w-[85%] sm:max-w-[75%] ${
+                className={`flex flex-col max-w-[85%] ${
                   isUser ? 'ml-auto items-end' : 'mr-auto items-start'
                 }`}
               >
                 <div
-                  className={`px-3.5 py-2.5 rounded-2xl text-xs sm:text-sm leading-relaxed whitespace-pre-wrap ${
+                  className={`px-3.5 py-2.5 rounded-2xl text-xs leading-relaxed whitespace-pre-wrap ${
                     isUser
                       ? 'bg-[#111111] text-white rounded-br-sm'
                       : 'bg-[#F7F8FA] text-[#111111] border border-neutral-200 rounded-bl-sm'
@@ -695,10 +785,10 @@ export const SupportView: React.FC<SupportViewProps> = ({
 
         {/* Chat Input Bar + Mic Voice Chat */}
         {isRecording ? (
-          <div className="p-3 sm:p-4 border-t border-red-200 bg-red-50 flex items-center justify-between gap-2">
+          <div className="p-3 border-t border-red-200 bg-red-50 flex items-center justify-between gap-2">
             <div className="flex items-center gap-2.5 min-w-0">
               <span className="w-3 h-3 rounded-full bg-[#DC2626] animate-ping shrink-0" />
-              <p className="text-xs sm:text-sm font-semibold text-[#DC2626] truncate">
+              <p className="text-xs font-semibold text-[#DC2626] truncate">
                 Recording voice...{' '}
                 <span className="font-mono-num">
                   0:{recordingSec < 10 ? `0${recordingSec}` : recordingSec}
@@ -729,7 +819,7 @@ export const SupportView: React.FC<SupportViewProps> = ({
         ) : (
           <form
             onSubmit={handleBotSubmit}
-            className="p-3 sm:p-4 border-t border-neutral-200 bg-[#F7F8FA] flex items-center gap-2"
+            className="p-3 border-t border-neutral-200 bg-[#F7F8FA] flex items-center gap-2"
           >
             <button
               type="button"
@@ -740,23 +830,22 @@ export const SupportView: React.FC<SupportViewProps> = ({
               className="min-h-[44px] min-w-[44px] px-3 rounded-xl border border-neutral-300 bg-white text-[#111111] hover:bg-[#FFC928]/20 inline-flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-50 shrink-0"
             >
               <Mic className="w-4 h-4 text-[#DC2626]" />
-              <span className="hidden sm:inline text-xs font-semibold">Speak</span>
             </button>
 
             <input
               type="text"
               value={botInput}
               onChange={(e) => setBotInput(e.target.value)}
-              placeholder="Apni bhasha mein likhein ya mic se bolein..."
+              placeholder="Apni bhasha mein likhein ya poochein..."
               maxLength={600}
               disabled={transcribing}
-              className="flex-1 h-11 rounded-xl border border-neutral-300 bg-white px-3.5 text-xs sm:text-sm text-[#111111] focus:outline-none focus:ring-2 focus:ring-[#FFC928]"
+              className="flex-1 min-w-0 h-11 rounded-xl border border-neutral-300 bg-white px-3 text-xs text-[#111111] focus:outline-none focus:ring-2 focus:ring-[#FFC928]"
             />
             <button
               type="submit"
               disabled={botLoading || transcribing || !botInput.trim()}
               aria-label="Send message to Shine"
-              className="min-h-[44px] px-4 rounded-xl bg-[#FFC928] text-[#111111] font-bold text-xs inline-flex items-center gap-1.5 hover:brightness-95 disabled:opacity-50 cursor-pointer shrink-0"
+              className="min-h-[44px] px-3.5 rounded-xl bg-[#FFC928] text-[#111111] font-bold text-xs inline-flex items-center gap-1.5 hover:brightness-95 disabled:opacity-50 cursor-pointer shrink-0"
             >
               <Send className="w-4 h-4" />
               <span>Send</span>
@@ -820,11 +909,12 @@ export const SupportView: React.FC<SupportViewProps> = ({
           </label>
 
           {formError && <p className="text-xs text-[#DC2626] font-medium">{formError}</p>}
+          {formSuccess && <p className="text-xs text-[#16A34A] font-medium">{formSuccess}</p>}
 
           <button
             type="submit"
             disabled={submitting}
-            className="w-full min-h-[44px] rounded-xl bg-[#FFC928] text-[#111111] font-semibold text-xs hover:brightness-95 cursor-pointer"
+            className="w-full min-h-[44px] rounded-xl bg-[#FFC928] text-[#111111] font-semibold text-xs hover:brightness-95 cursor-pointer disabled:opacity-60"
           >
             {submitting ? 'Submitting Ticket...' : 'Submit Ticket'}
           </button>
@@ -897,7 +987,7 @@ export const SupportView: React.FC<SupportViewProps> = ({
                   placeholder="Write a reply..."
                   value={replyText}
                   onChange={(e) => setReplyText(e.target.value)}
-                  className="flex-1 h-11 rounded-xl border border-neutral-300 px-3 text-xs focus:outline-none focus:ring-2 focus:ring-[#FFC928]"
+                  className="flex-1 min-w-0 h-11 rounded-xl border border-neutral-300 px-3 text-xs focus:outline-none focus:ring-2 focus:ring-[#FFC928]"
                 />
                 <button
                   type="submit"
